@@ -1,0 +1,19 @@
+# Core dependencies
+requests>=2.31.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# Audio processing
+pydub>=0.25.1
+ffmpeg-python>=0.2.0
+
+# Web framework (for API and webhooks)
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Optional: Speech-to-text (lightweight)
+# whisper-cpp-python>=0.1.0  # Uncomment if using Whisper.cpp
+# openai-whisper>=20231117    # Alternative: full Whisper (heavier)
+
+# Utilities
+python-dateutil>=2.8.2

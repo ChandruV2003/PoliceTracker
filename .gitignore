@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+*.env
+
+# Logs
+*.log
+logs/
+
+# Audio cache
+audio_cache/
+*.wav
+*.mp3
+*.m4a
+
+# Config (if sensitive)
+config.local.yaml
+
+# OS
+.DS_Store
+Thumbs.db
