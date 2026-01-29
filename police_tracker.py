@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Optional
 import yaml
+import requests
 from flask import Flask, jsonify
 from dotenv import load_dotenv
 
@@ -34,6 +35,37 @@ AUDIO_CACHE_DIR.mkdir(exist_ok=True)
 app = Flask(__name__)
 active_streams: Dict[str, subprocess.Popen] = {}
 stream_status: Dict[str, Dict] = {}
+web_api_url: Optional[str] = None
+
+
+def send_event_to_api(channel: str, keywords: List[str], transcript: str = "", priority: int = 5, location: str = "", api_url: Optional[str] = None):
+    """Send detected event to web API"""
+    api_endpoint = api_url or web_api_url
+    
+    if not api_endpoint:
+        logger.debug("No web API URL configured, skipping event send")
+        return False
+    
+    event_data = {
+        "channel": channel,
+        "timestamp": time.time(),
+        "keywords": keywords,
+        "transcript": transcript,
+        "priority": priority,
+        "location": location
+    }
+    
+    try:
+        response = requests.post(api_endpoint, json=event_data, timeout=5)
+        if response.status_code == 201:
+            logger.info(f"Event sent to web API: {channel} - {keywords}")
+            return True
+        else:
+            logger.warning(f"Failed to send event: {response.status_code} - {response.text}")
+            return False
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error sending event to web API: {e}")
+        return False
 
 
 class ChannelMonitor:
@@ -46,6 +78,16 @@ class ChannelMonitor:
         self.enabled = channel_config.get("enabled", True)
         self.process: Optional[subprocess.Popen] = None
         self.running = False
+        
+    def trigger_event(self, detected_keywords: List[str], transcript: str = "", priority: int = 5):
+        """Trigger an event when keywords are detected"""
+        logger.info(f"Event detected on {self.name}: {detected_keywords}")
+        send_event_to_api(
+            channel=self.name,
+            keywords=detected_keywords,
+            transcript=transcript,
+            priority=priority
+        )
         
     def start(self):
         """Start monitoring this channel"""
@@ -147,6 +189,14 @@ if __name__ == "__main__":
     
     # Load configuration
     config = load_config()
+    
+    # Get web API endpoint from config
+    alerts_config = config.get("alerts", {})
+    web_api_url = alerts_config.get("api_endpoint") or os.environ.get("WEB_API_URL")
+    if web_api_url:
+        logger.info(f"Web API endpoint configured: {web_api_url}")
+    else:
+        logger.warning("No web API endpoint configured - events will not be sent to dashboard")
     
     # Start monitoring channels
     active_monitors = start_monitors(config)

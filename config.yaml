@@ -21,7 +21,7 @@ channels:
 # Alert settings
 alerts:
   webhook_url: ""  # Optional: webhook endpoint for notifications
-  api_endpoint: "http://localhost:8892/api/events"  # PoliceTracker Web API endpoint
+  api_endpoint: ""  # Optional: API endpoint for sending alerts
   
 # Processing settings
 processing:
