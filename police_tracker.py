@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 CONFIG_FILE = Path("config.yaml")
+CONFIG_LOCAL_FILE = Path("config.local.yaml")
 AUDIO_CACHE_DIR = Path("audio_cache")
 AUDIO_CACHE_DIR.mkdir(exist_ok=True)
 
@@ -356,13 +357,34 @@ class ChannelMonitor:
 
 def load_config() -> Dict:
     """Load configuration from YAML file"""
-    if not CONFIG_FILE.exists():
-        logger.error(f"Config file not found: {CONFIG_FILE}")
-        logger.info("Please copy config.yaml.example to config.yaml and configure it")
+    def deep_merge(base: object, override: object) -> object:
+        if isinstance(base, dict) and isinstance(override, dict):
+            merged = dict(base)
+            for key, value in override.items():
+                merged[key] = deep_merge(base.get(key), value)
+            return merged
+        # Lists and scalars: override wins
+        return override
+
+    base_config: Dict = {}
+    local_config: Dict = {}
+
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r") as f:
+            base_config = yaml.safe_load(f) or {}
+
+    if CONFIG_LOCAL_FILE.exists():
+        with open(CONFIG_LOCAL_FILE, "r") as f:
+            local_config = yaml.safe_load(f) or {}
+
+    if not base_config and not local_config:
+        logger.error(f"No config found. Expected {CONFIG_FILE} and/or {CONFIG_LOCAL_FILE}")
+        logger.info("Create config.local.yaml from config.yaml.example and configure it")
         sys.exit(1)
-    
-    with open(CONFIG_FILE, 'r') as f:
-        return yaml.safe_load(f)
+
+    if local_config:
+        return deep_merge(base_config, local_config)  # type: ignore[arg-type]
+    return base_config
 
 
 def start_monitors(config: Dict) -> List[ChannelMonitor]:

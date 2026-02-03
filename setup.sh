@@ -30,11 +30,11 @@ echo "Installing dependencies..."
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Copy example config if config doesn't exist
-if [ ! -f "config.yaml" ]; then
-    echo "Creating config.yaml from example..."
-    cp config.yaml.example config.yaml
-    echo "Please edit config.yaml with your channel URLs and settings"
+# Copy example config if local config doesn't exist
+if [ ! -f "config.local.yaml" ]; then
+    echo "Creating config.local.yaml from example..."
+    cp config.yaml.example config.local.yaml
+    echo "Please edit config.local.yaml with your channel URLs and settings"
 fi
 
 # Create audio cache directory
@@ -44,6 +44,6 @@ echo ""
 echo "Setup complete!"
 echo ""
 echo "Next steps:"
-echo "1. Edit config.yaml with your channel URLs and keywords"
+echo "1. Edit config.local.yaml with your channel URLs and keywords"
 echo "2. Run: source venv/bin/activate && python police_tracker.py"
 echo ""

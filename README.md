@@ -19,7 +19,7 @@ pip install -r requirements.txt
 
 2. Ensure FFmpeg is installed and on your PATH
 
-3. Configure channels in `config.yaml` or via environment variables
+3. Configure channels in `config.local.yaml` (recommended; ignored by git). `config.yaml` can hold safe defaults.
 
 4. Run:
 ```bash
