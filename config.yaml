@@ -9,6 +9,8 @@ channels:
       - "pursuit"
       - "shots fired"
       - "officer down"
+    location: "Somerset County, NJ"
+    priority: 7
     enabled: true
   
   - name: "Parkway Channel 1"
@@ -16,12 +18,15 @@ channels:
     keywords:
       - "traffic stop"
       - "accident"
+    location: "Garden State Parkway"
+    priority: 5
     enabled: true
 
 # Alert settings
 alerts:
   webhook_url: ""  # Optional: webhook endpoint for notifications
-  api_endpoint: ""  # Optional: API endpoint for sending alerts
+  api_endpoint: "http://localhost:8892/api/events"  # Optional: API endpoint for sending alerts
+  api_token: ""  # Optional: API token for POSTing events
   
 # Processing settings
 processing:
@@ -29,6 +34,7 @@ processing:
   transcription_model: "base"  # whisper model size: tiny, base, small, medium, large
   audio_chunk_duration: 10  # seconds per chunk for processing
   keyword_match_threshold: 0.8  # confidence threshold for keyword matching
+  sample_rate: 16000  # audio sample rate for processing
 
 # Server settings
 server:

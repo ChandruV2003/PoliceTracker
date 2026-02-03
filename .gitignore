@@ -33,7 +33,15 @@ audio_cache/
 
 # Config (if sensitive)
 config.local.yaml
+config.yaml
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Runtime data
+data/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal

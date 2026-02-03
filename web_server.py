@@ -6,6 +6,7 @@ import os
 import json
 import logging
 import signal
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta
@@ -26,9 +27,19 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)  # Allow cross-origin requests for public access
+API_TOKEN = os.environ.get("API_TOKEN")
 
-# In-memory event storage (can be upgraded to SQLite/Postgres later)
-events: deque = deque(maxlen=10000)  # Keep last 10k events
+# Persistence
+DB_PATH = Path(os.environ.get("DATABASE_PATH", "data/policetracker.db"))
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+db_lock = threading.Lock()
+db_conn: sqlite3.Connection = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
+db_conn.row_factory = sqlite3.Row
+db_conn.execute("PRAGMA journal_mode=WAL;")
+db_conn.execute("PRAGMA foreign_keys=ON;")
+
+# In-memory event cache (dashboard queries still hit SQLite; this is for quick stats + sanity)
+events: deque = deque(maxlen=10000)  # Keep last 10k events in memory
 stats_lock = threading.Lock()
 
 # Statistics
@@ -39,6 +50,167 @@ stats = {
     "last_event_time": None,
     "start_time": time.time()
 }
+
+
+def init_db():
+    """Initialize SQLite schema."""
+    with db_lock:
+        db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                channel TEXT NOT NULL,
+                keywords TEXT,
+                transcript TEXT,
+                priority INTEGER,
+                location TEXT,
+                raw_data TEXT
+            )
+        """)
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_events_channel ON events(channel)")
+        db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS event_keywords (
+                event_id INTEGER NOT NULL,
+                keyword TEXT NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+            )
+        """)
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_event_keywords_keyword ON event_keywords(keyword)")
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_event_keywords_event_id ON event_keywords(event_id)")
+        db_conn.commit()
+
+
+def load_recent_events_into_memory():
+    """Warm in-memory cache with recent events from SQLite."""
+    with db_lock:
+        rows = db_conn.execute(
+            "SELECT id, timestamp, channel, keywords, transcript, priority, location FROM events ORDER BY timestamp DESC LIMIT ?",
+            (events.maxlen,)
+        ).fetchall()
+
+    # Reverse: oldest first, so deque ends with newest
+    with stats_lock:
+        events.clear()
+        for row in reversed(rows):
+            events.append({
+                "id": row["id"],
+                "timestamp": row["timestamp"],
+                "channel": row["channel"],
+                "keywords": json.loads(row["keywords"]) if row["keywords"] else [],
+                "transcript": row["transcript"] or "",
+                "priority": row["priority"] if row["priority"] is not None else 5,
+                "location": row["location"] or ""
+            })
+
+
+def rebuild_stats_from_db():
+    """Rebuild aggregate stats from SQLite (used on startup)."""
+    with db_lock:
+        total_events_row = db_conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()
+        last_event_row = db_conn.execute("SELECT MAX(timestamp) AS t FROM events").fetchone()
+        channel_rows = db_conn.execute("SELECT channel, COUNT(*) AS c FROM events GROUP BY channel").fetchall()
+        keyword_rows = db_conn.execute("SELECT keyword, COUNT(*) AS c FROM event_keywords GROUP BY keyword").fetchall()
+
+    total_events = int(total_events_row["c"]) if total_events_row else 0
+    last_event_time = float(last_event_row["t"]) if last_event_row and last_event_row["t"] is not None else None
+    events_by_channel = {row["channel"]: int(row["c"]) for row in channel_rows}
+    events_by_keyword = {row["keyword"]: int(row["c"]) for row in keyword_rows}
+
+    with stats_lock:
+        stats["total_events"] = total_events
+        stats["last_event_time"] = last_event_time
+        stats["events_by_channel"] = events_by_channel
+        stats["events_by_keyword"] = events_by_keyword
+
+
+def persist_event(event: Dict) -> int:
+    """Insert an event into SQLite. Returns the new event ID."""
+    keywords_list = event.get("keywords", []) or []
+    keywords_json = json.dumps(keywords_list)
+    raw_data_json = json.dumps(event.get("raw_data", {}))
+
+    with db_lock:
+        cur = db_conn.execute(
+            """
+            INSERT INTO events (timestamp, channel, keywords, transcript, priority, location, raw_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                float(event.get("timestamp", time.time())),
+                event.get("channel", ""),
+                keywords_json,
+                event.get("transcript", ""),
+                int(event.get("priority", 5)),
+                event.get("location", ""),
+                raw_data_json
+            )
+        )
+        event_id = int(cur.lastrowid)
+
+        for kw in keywords_list:
+            db_conn.execute(
+                "INSERT INTO event_keywords (event_id, keyword) VALUES (?, ?)",
+                (event_id, str(kw))
+            )
+
+        db_conn.commit()
+
+    return event_id
+
+
+def query_events(limit: int, channel: Optional[str] = None, keyword: Optional[str] = None, since: Optional[float] = None) -> List[Dict]:
+    """Query events from SQLite with optional filters."""
+    sql = "SELECT id, timestamp, channel, keywords, transcript, priority, location FROM events e WHERE 1=1"
+    params: List[object] = []
+
+    if channel:
+        sql += " AND e.channel = ?"
+        params.append(channel)
+
+    if since is not None:
+        sql += " AND e.timestamp >= ?"
+        params.append(float(since))
+
+    if keyword:
+        kw = keyword.lower()
+        kw_like = f"%{kw}%"
+        sql += """
+            AND (
+                LOWER(COALESCE(e.transcript, '')) LIKE ?
+                OR EXISTS (
+                    SELECT 1 FROM event_keywords ek
+                    WHERE ek.event_id = e.id AND LOWER(ek.keyword) LIKE ?
+                )
+            )
+        """
+        params.extend([kw_like, kw_like])
+
+    sql += " ORDER BY e.timestamp DESC LIMIT ?"
+    params.append(int(limit))
+
+    with db_lock:
+        rows = db_conn.execute(sql, params).fetchall()
+
+    results: List[Dict] = []
+    for row in rows:
+        results.append({
+            "id": row["id"],
+            "timestamp": row["timestamp"],
+            "channel": row["channel"],
+            "keywords": json.loads(row["keywords"]) if row["keywords"] else [],
+            "transcript": row["transcript"] or "",
+            "priority": row["priority"] if row["priority"] is not None else 5,
+            "location": row["location"] or ""
+        })
+    return results
+
+
+# Initialize persistence + caches on import (works for both direct run and gunicorn)
+init_db()
+load_recent_events_into_memory()
+rebuild_stats_from_db()
+logger.info(f"Using SQLite database at: {DB_PATH}")
 
 
 # Modern dashboard HTML template
@@ -461,35 +633,28 @@ def dashboard():
 @app.route('/api/events', methods=['GET'])
 def get_events():
     """Get events with optional filtering"""
+    rebuild_stats_from_db()
     limit = int(request.args.get('limit', 100))
     channel = request.args.get('channel')
     keyword = request.args.get('keyword')
     since = request.args.get('since')  # Unix timestamp
-    
-    with stats_lock:
-        filtered_events = list(events)
-    
-    # Apply filters
-    if channel:
-        filtered_events = [e for e in filtered_events if e.get('channel') == channel]
-    
-    if keyword:
-        filtered_events = [e for e in filtered_events 
-                          if keyword.lower() in str(e.get('keywords', [])).lower() or
-                          keyword.lower() in str(e.get('transcript', '')).lower()]
-    
+
+    since_ts: Optional[float] = None
     if since:
-        since_ts = float(since)
-        filtered_events = [e for e in filtered_events if e.get('timestamp', 0) >= since_ts]
-    
-    # Sort by timestamp (newest first) and limit
-    filtered_events.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
-    filtered_events = filtered_events[:limit]
+        try:
+            since_ts = float(since)
+        except ValueError:
+            return jsonify({"error": "Invalid 'since' timestamp"}), 400
+
+    filtered_events = query_events(limit=limit, channel=channel, keyword=keyword, since=since_ts)
+
+    with stats_lock:
+        stats_snapshot = dict(stats)
     
     return jsonify({
         "events": filtered_events,
         "count": len(filtered_events),
-        "stats": stats
+        "stats": stats_snapshot
     })
 
 
@@ -497,6 +662,12 @@ def get_events():
 def create_event():
     """Receive new event from PoliceTracker"""
     try:
+        if API_TOKEN:
+            auth_header = request.headers.get("Authorization", "")
+            api_key_header = request.headers.get("X-API-Key", "")
+            if auth_header != f"Bearer {API_TOKEN}" and api_key_header != API_TOKEN:
+                return jsonify({"error": "Unauthorized"}), 401
+
         data = request.get_json()
         
         if not data:
@@ -506,10 +677,9 @@ def create_event():
         if 'channel' not in data or 'timestamp' not in data:
             return jsonify({"error": "Missing required fields: channel, timestamp"}), 400
         
-        # Add event ID and ensure timestamp
+        # Build event payload
         event = {
-            "id": len(events) + 1,
-            "timestamp": data.get('timestamp', time.time()),
+            "timestamp": float(data.get('timestamp', time.time())),
             "channel": data.get('channel'),
             "keywords": data.get('keywords', []),
             "transcript": data.get('transcript', ''),
@@ -517,11 +687,14 @@ def create_event():
             "location": data.get('location', ''),
             "raw_data": data
         }
+
+        event_id = persist_event(event)
+        event["id"] = event_id
         
-        # Add to events list
+        # Add to in-memory cache + update stats
         with stats_lock:
             events.append(event)
-            stats["total_events"] += 1
+            stats["total_events"] = int(stats.get("total_events", 0)) + 1
             
             # Update channel stats
             channel = event['channel']
@@ -549,6 +722,7 @@ def create_event():
 @app.route('/api/stats')
 def get_stats():
     """Get statistics"""
+    rebuild_stats_from_db()
     with stats_lock:
         uptime = time.time() - stats["start_time"]
         return jsonify({
@@ -568,6 +742,11 @@ def health():
 def signal_handler(sig, frame):
     """Handle shutdown signals"""
     logger.info("Shutting down web server...")
+    try:
+        with db_lock:
+            db_conn.close()
+    except Exception:
+        pass
     sys.exit(0)
 
 
@@ -582,5 +761,7 @@ if __name__ == "__main__":
     logger.info(f"Starting PoliceTracker Web Server on {host}:{port}")
     logger.info(f"Dashboard available at: http://{host}:{port}")
     logger.info(f"API available at: http://{host}:{port}/api/events")
+    if API_TOKEN:
+        logger.info("API token protection enabled for POST /api/events")
     
     app.run(host=host, port=port, debug=False, threaded=True)

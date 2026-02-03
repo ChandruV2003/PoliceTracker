@@ -5,6 +5,17 @@ set -e
 
 echo "Setting up PoliceTracker..."
 
+# Check system dependency: ffmpeg (required for streaming)
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo ""
+    echo "WARNING: ffmpeg was not found on your PATH."
+    echo "PoliceTracker streaming requires ffmpeg."
+    echo ""
+    echo "On macOS with Homebrew:"
+    echo "  brew install ffmpeg"
+    echo ""
+fi
+
 # Create virtual environment if it doesn't exist
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment..."

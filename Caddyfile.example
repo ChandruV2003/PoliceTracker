@@ -1,0 +1,17 @@
+# Example Caddy config for HTTPS + reverse proxy
+#
+# 1) Replace "yourdomain.com" with your real domain.
+# 2) Run the app locally (recommended):
+#      WEB_HOST=127.0.0.1 WEB_PORT=8892 ./start_web_server_prod.sh
+# 3) Run caddy:
+#      caddy run --config ./Caddyfile
+#
+# Notes:
+# - You must forward ports 80 and 443 from your router to this machine.
+# - Your domain's DNS A record must point to your public IP.
+
+yourdomain.com {
+    encode gzip
+    reverse_proxy 127.0.0.1:8892
+}
+
