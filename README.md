@@ -69,7 +69,13 @@ For a recommended HTTPS setup, see `PUBLIC_DEPLOYMENT.md`.
 export API_TOKEN="your-secret-token"
 ```
 
-Then add the same token to `config.yaml` under `alerts.api_token` so the listener can authenticate.
+Then add the same token to `config.local.yaml` under `alerts.api_token` so the listener can authenticate.
+
+5. (Optional) Protect the dashboard + read APIs with Basic Auth:
+```bash
+export DASHBOARD_USER="admin"
+export DASHBOARD_PASS="set-a-strong-password"
+```
 
 ## Transcription
 

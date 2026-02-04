@@ -57,10 +57,11 @@ http://YOUR_PUBLIC_IP:8892
 ⚠️ **Warning**: Exposing the dashboard to the internet makes it publicly accessible. Consider:
 
 1. **Add Authentication** (future enhancement)
-2. **Protect the API** by setting an `API_TOKEN` environment variable and using the same token in `config.yaml` under `alerts.api_token`
-3. **Use HTTPS** (requires SSL certificate)
-4. **Firewall Rules** - Only allow specific IPs if possible
-5. **VPN Alternative** - Consider using a VPN instead of direct exposure
+2. **Protect event ingestion** by setting an `API_TOKEN` environment variable and using the same token in `config.local.yaml` under `alerts.api_token`
+3. **Protect the dashboard/read APIs** by setting `DASHBOARD_USER` and `DASHBOARD_PASS` (HTTP Basic Auth)
+4. **Use HTTPS** (requires SSL certificate)
+5. **Firewall Rules** - Only allow specific IPs if possible
+6. **VPN Alternative** - Consider using a VPN instead of direct exposure
 
 ## Testing
 

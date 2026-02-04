@@ -70,5 +70,5 @@ Then forward external port `8892` -> this Mac `8892`.
 ## Notes / Gotchas
 
 - If your ISP uses CGNAT, router port forwarding won’t work. In that case, use a tunnel (Cloudflare Tunnel, Tailscale Funnel, ngrok, etc.).
-- If you enable `API_TOKEN`, only event ingestion (`POST /api/events`) is protected. The dashboard and `GET /api/events` remain public by design.
-
+- If you enable `API_TOKEN`, only event ingestion (`POST /api/events`) is protected.
+- To protect the dashboard + read APIs, set `DASHBOARD_USER` and `DASHBOARD_PASS` (HTTP Basic Auth).
