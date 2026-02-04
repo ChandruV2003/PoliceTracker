@@ -9,10 +9,12 @@ import signal
 import sqlite3
 import sys
 import time
+from base64 import b64decode
 from datetime import datetime, timedelta
+from functools import wraps
 from pathlib import Path
 from typing import List, Dict, Optional
-from flask import Flask, render_template_string, jsonify, request
+from flask import Flask, render_template_string, jsonify, request, Response
 from flask_cors import CORS
 from collections import deque
 import threading
@@ -28,6 +30,35 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Allow cross-origin requests for public access
 API_TOKEN = os.environ.get("API_TOKEN")
+DASHBOARD_USER = os.environ.get("DASHBOARD_USER")
+DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS")
+
+
+def require_dashboard_auth(handler):
+    """Optional HTTP Basic Auth for the dashboard and read APIs."""
+
+    @wraps(handler)
+    def wrapper(*args, **kwargs):
+        if not (DASHBOARD_USER and DASHBOARD_PASS):
+            return handler(*args, **kwargs)
+
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                decoded = b64decode(auth.split(" ", 1)[1]).decode("utf-8")
+                username, password = decoded.split(":", 1)
+                if username == DASHBOARD_USER and password == DASHBOARD_PASS:
+                    return handler(*args, **kwargs)
+            except Exception:
+                pass
+
+        return Response(
+            "Unauthorized",
+            401,
+            {"WWW-Authenticate": 'Basic realm="PoliceTracker"'},
+        )
+
+    return wrapper
 
 # Persistence
 DB_PATH = Path(os.environ.get("DATABASE_PATH", "data/policetracker.db"))
@@ -213,424 +244,586 @@ rebuild_stats_from_db()
 logger.info(f"Using SQLite database at: {DB_PATH}")
 
 
-# Modern dashboard HTML template
+# Utilitarian (mobile-first) dashboard HTML template
 DASHBOARD_TEMPLATE = """
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PoliceTracker - Live Incident Dashboard</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #333;
-            min-height: 100vh;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-        
-        .header {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 16px;
-            padding: 24px 32px;
-            margin-bottom: 24px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 16px;
-        }
-        
-        .header h1 {
-            font-size: 2em;
-            font-weight: 700;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        
-        .stats {
-            display: flex;
-            gap: 16px;
-            flex-wrap: wrap;
-        }
-        
-        .stat-card {
-            background: rgba(255, 255, 255, 0.9);
-            padding: 12px 20px;
-            border-radius: 12px;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
-        }
-        
-        .stat-label {
-            font-size: 0.85em;
-            color: #666;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .stat-value {
-            font-size: 1.5em;
-            font-weight: 700;
-            color: #667eea;
-            margin-top: 4px;
-        }
-        
-        .status-indicator {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #10b981;
-            box-shadow: 0 0 10px #10b981;
-            animation: pulse 2s infinite;
-            margin-right: 8px;
-        }
-        
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        
-        .controls {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 16px;
-            padding: 20px;
-            margin-bottom: 24px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-        
-        .filter-btn {
-            padding: 8px 16px;
-            border: 2px solid #667eea;
-            background: white;
-            color: #667eea;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 600;
-            transition: all 0.2s;
-        }
-        
-        .filter-btn:hover {
-            background: #667eea;
-            color: white;
-        }
-        
-        .filter-btn.active {
-            background: #667eea;
-            color: white;
-        }
-        
-        .events-container {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 16px;
-            padding: 24px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-            max-height: 70vh;
-            overflow-y: auto;
-        }
-        
-        .event-card {
-            background: white;
-            border-left: 4px solid #667eea;
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 16px;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
-            transition: transform 0.2s, box-shadow 0.2s;
-            animation: slideIn 0.3s ease-out;
-        }
-        
-        .event-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
-        }
-        
-        .event-card.priority-high {
-            border-left-color: #ef4444;
-            background: linear-gradient(to right, #fef2f2 0%, white 10%);
-        }
-        
-        .event-card.priority-medium {
-            border-left-color: #f59e0b;
-            background: linear-gradient(to right, #fffbeb 0%, white 10%);
-        }
-        
-        @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateX(-20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateX(0);
-            }
-        }
-        
-        .event-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: start;
-            margin-bottom: 12px;
-            flex-wrap: wrap;
-            gap: 12px;
-        }
-        
-        .event-channel {
-            font-weight: 700;
-            color: #667eea;
-            font-size: 1.1em;
-        }
-        
-        .event-time {
-            color: #666;
-            font-size: 0.9em;
-        }
-        
-        .event-keywords {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            margin-top: 12px;
-        }
-        
-        .keyword-badge {
-            background: #667eea;
-            color: white;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }
-        
-        .event-transcript {
-            margin-top: 12px;
-            color: #555;
-            line-height: 1.6;
-            font-style: italic;
-        }
-        
-        .empty-state {
-            text-align: center;
-            padding: 60px 20px;
-            color: #999;
-        }
-        
-        .empty-state h2 {
-            font-size: 1.5em;
-            margin-bottom: 12px;
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #667eea;
-        }
-        
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-        
-        ::-webkit-scrollbar-track {
-            background: #f1f1f1;
-            border-radius: 10px;
-        }
-        
-        ::-webkit-scrollbar-thumb {
-            background: #667eea;
-            border-radius: 10px;
-        }
-        
-        ::-webkit-scrollbar-thumb:hover {
-            background: #5568d3;
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PoliceTracker Dashboard</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --danger: #dc2626;
+      --warn: #d97706;
+      --ok: #16a34a;
+      --shadow: 0 1px 2px rgba(0,0,0,.06), 0 10px 24px rgba(0,0,0,.05);
+      --radius: 12px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 14px;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      gap: 12px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .topbar {
+      padding: 14px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+      letter-spacing: 0.2px;
+    }
+
+    .subline {
+      margin-top: 6px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 2px rgba(22,163,74,.15);
+      display: inline-block;
+    }
+
+    .dot.offline {
+      background: var(--danger);
+      box-shadow: 0 0 0 2px rgba(220,38,38,.15);
+    }
+
+    .kpis {
+      display: grid;
+      grid-auto-flow: column;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .kpi {
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      min-width: 112px;
+    }
+
+    .kpi .label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+
+    .kpi .value {
+      margin-top: 4px;
+      font-family: var(--mono);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .controls {
+      padding: 12px;
+      display: grid;
+      grid-template-columns: 1fr 220px 160px 160px auto;
+      gap: 10px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    .controls input,
+    .controls select {
+      width: 100%;
+      padding: 10px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+
+    .controls input:focus,
+    .controls select:focus {
+      border-color: rgba(37, 99, 235, .7);
+      box-shadow: 0 0 0 4px rgba(37, 99, 235, .12);
+    }
+
+    .controls button {
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(37, 99, 235, .35);
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .controls button:active {
+      transform: translateY(1px);
+    }
+
+    .events {
+      overflow: hidden;
+    }
+
+    .events-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .event {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .event:last-child { border-bottom: none; }
+
+    .when {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .meta {
+      margin-top: 8px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+      font-family: var(--mono);
+      color: var(--muted);
+      background: #fff;
+    }
+
+    .pill.prio-high { border-color: rgba(220,38,38,.35); color: var(--danger); background: rgba(220,38,38,.06); }
+    .pill.prio-med  { border-color: rgba(217,119,6,.35); color: var(--warn); background: rgba(217,119,6,.08); }
+    .pill.prio-low  { border-color: rgba(107,114,128,.35); color: #374151; background: rgba(107,114,128,.06); }
+
+    .mainline {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: baseline;
+    }
+
+    .channel {
+      font-weight: 800;
+      font-size: 14px;
+      letter-spacing: 0.2px;
+    }
+
+    .location {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .transcript {
+      margin-top: 6px;
+      color: #1f2937;
+      font-size: 13px;
+      line-height: 1.5;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .event.expanded .transcript {
+      -webkit-line-clamp: unset;
+    }
+
+    .badges {
+      margin-top: 8px;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .badge {
+      background: rgba(17,24,39,.06);
+      border: 1px solid rgba(17,24,39,.10);
+      color: #374151;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-family: var(--mono);
+    }
+
+    .actions {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .linkbtn {
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .empty {
+      padding: 40px 12px;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    @media (max-width: 900px) {
+      .controls { grid-template-columns: 1fr 1fr; }
+      .controls button { grid-column: 1 / -1; }
+      .kpis { grid-auto-flow: row; width: 100%; }
+    }
+
+    @media (max-width: 640px) {
+      body { padding: 10px; }
+      .event { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr; position: static; }
+      .kpi { min-width: unset; }
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
+  <div class="container">
+    <header class="panel topbar">
+      <div class="brand">
+        <h1>PoliceTracker</h1>
+        <div class="subline">
+          <span id="status-dot" class="dot"></span>
+          <span id="status-text">Live</span>
+          <span>•</span>
+          <span>Updated <span id="last-update">--</span></span>
+        </div>
+      </div>
+      <div class="kpis">
+        <div class="kpi">
+          <div class="label">Total Events</div>
+          <div class="value" id="total-events">0</div>
+        </div>
+        <div class="kpi">
+          <div class="label">Last Event</div>
+          <div class="value" id="last-event">--</div>
+        </div>
+      </div>
+    </header>
+
+    <section class="panel controls">
+      <input id="search" type="search" placeholder="Search keyword or transcript..." autocomplete="off" />
+      <select id="channel">
+        <option value="all">All channels</option>
+      </select>
+      <select id="priority">
+        <option value="all">All priorities</option>
+        <option value="high">High (8-10)</option>
+        <option value="med">Medium (5-7)</option>
+        <option value="low">Low (0-4)</option>
+      </select>
+      <select id="range">
+        <option value="all">All time</option>
+        <option value="1h">Last hour</option>
+        <option value="24h">Last 24 hours</option>
+      </select>
+      <button id="refresh" type="button">Refresh</button>
+    </section>
+
+    <section class="panel events">
+      <div class="events-header">
+        <div><span id="result-count">0</span> events loaded</div>
+        <div style="font-family: var(--mono);">GET /api/events</div>
+      </div>
+      <div id="events-list">
+        <div class="empty">Loading...</div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const state = {
+      search: "",
+      channel: "all",
+      priority: "all",
+      range: "all"
+    };
+
+    let allEvents = [];
+    let lastStats = {};
+    let lastRefreshOk = true;
+
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.textContent = String(text || "");
+      return div.innerHTML;
+    }
+
+    function formatRel(timestamp) {
+      const date = new Date(timestamp * 1000);
+      const now = new Date();
+      const diffMs = now - date;
+      if (diffMs < 10 * 1000) return "just now";
+      if (diffMs < 60 * 1000) return Math.floor(diffMs / 1000) + "s ago";
+      if (diffMs < 60 * 60 * 1000) return Math.floor(diffMs / (60 * 1000)) + "m ago";
+      if (diffMs < 24 * 60 * 60 * 1000) return Math.floor(diffMs / (60 * 60 * 1000)) + "h ago";
+      return date.toLocaleString();
+    }
+
+    function priorityClass(p) {
+      const pr = Number(p ?? 5);
+      if (pr >= 8) return "prio-high";
+      if (pr >= 5) return "prio-med";
+      return "prio-low";
+    }
+
+    function applyPriorityFilter(events) {
+      const f = state.priority;
+      if (f === "high") return events.filter(e => (e.priority ?? 5) >= 8);
+      if (f === "med") return events.filter(e => (e.priority ?? 5) >= 5 && (e.priority ?? 5) < 8);
+      if (f === "low") return events.filter(e => (e.priority ?? 5) < 5);
+      return events;
+    }
+
+    function rangeSince() {
+      const now = Date.now() / 1000;
+      if (state.range === "1h") return now - 3600;
+      if (state.range === "24h") return now - 86400;
+      return null;
+    }
+
+    function updateStatus(ok) {
+      const dot = document.getElementById("status-dot");
+      const text = document.getElementById("status-text");
+      if (ok) {
+        dot.classList.remove("offline");
+        text.textContent = "Live";
+      } else {
+        dot.classList.add("offline");
+        text.textContent = "Offline";
+      }
+    }
+
+    function populateChannels(stats) {
+      const select = document.getElementById("channel");
+      const current = select.value || state.channel;
+      const channels = Object.keys((stats && stats.events_by_channel) || {}).sort((a, b) => a.localeCompare(b));
+
+      const options = ["<option value=\\"all\\">All channels</option>"];
+      for (const ch of channels) {
+        options.push(`<option value="${escapeHtml(ch)}">${escapeHtml(ch)}</option>`);
+      }
+      select.innerHTML = options.join("");
+      select.value = current;
+      state.channel = select.value;
+    }
+
+    function render() {
+      const container = document.getElementById("events-list");
+      let eventsToShow = applyPriorityFilter(allEvents);
+
+      document.getElementById("result-count").textContent = String(eventsToShow.length);
+
+      if (!eventsToShow.length) {
+        container.innerHTML = `<div class="empty">No events match the current filters.</div>`;
+        return;
+      }
+
+      container.innerHTML = eventsToShow.map(e => {
+        const ts = Number(e.timestamp || 0);
+        const abs = new Date(ts * 1000).toLocaleString();
+        const pr = Number(e.priority ?? 5);
+        const keywords = Array.isArray(e.keywords) ? e.keywords : [];
+        const loc = e.location ? String(e.location) : "";
+        const transcript = e.transcript ? String(e.transcript) : "";
+
+        return `
+          <div class="event" data-id="${escapeHtml(e.id || "")}">
             <div>
-                <h1>🚔 PoliceTracker</h1>
-                <p style="color: #666; margin-top: 8px;">Live Incident Monitoring Dashboard</p>
+              <div class="when" title="${escapeHtml(abs)}">${escapeHtml(formatRel(ts))}<br/><span style="color: var(--muted);">${escapeHtml(abs)}</span></div>
+              <div class="meta">
+                <span class="pill ${priorityClass(pr)}">P${escapeHtml(pr)}</span>
+                <span class="pill">#${escapeHtml(e.id || "-")}</span>
+              </div>
             </div>
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="stat-label">Status</div>
-                    <div class="stat-value">
-                        <span class="status-indicator"></span>
-                        <span id="status-text">Live</span>
-                    </div>
+            <div>
+              <div class="mainline">
+                <div class="channel">${escapeHtml(e.channel || "Unknown")}</div>
+                ${loc ? `<div class="location">${escapeHtml(loc)}</div>` : `<div class="location"></div>`}
+              </div>
+              ${transcript ? `<div class="transcript">"${escapeHtml(transcript)}"</div>` : `<div class="transcript" style="color: var(--muted);">No transcript</div>`}
+              ${keywords.length ? `
+                <div class="badges">
+                  ${keywords.map(k => `<span class="badge">${escapeHtml(k)}</span>`).join("")}
                 </div>
-                <div class="stat-card">
-                    <div class="stat-label">Total Events</div>
-                    <div class="stat-value" id="total-events">0</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Last Update</div>
-                    <div class="stat-value" id="last-update" style="font-size: 1em;">--</div>
-                </div>
+              ` : ``}
+              <div class="actions">
+                <button class="linkbtn" type="button" data-action="toggle">Details</button>
+              </div>
             </div>
-        </div>
-        
-        <div class="controls">
-            <button class="filter-btn active" onclick="filterEvents('all')">All Events</button>
-            <button class="filter-btn" onclick="filterEvents('high')">High Priority</button>
-            <button class="filter-btn" onclick="filterEvents('medium')">Medium Priority</button>
-            <button class="filter-btn" onclick="filterEvents('low')">Low Priority</button>
-            <button class="filter-btn" onclick="filterEvents('recent')">Last Hour</button>
-        </div>
-        
-        <div class="events-container">
-            <div id="events-list">
-                <div class="loading">Loading events...</div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        let allEvents = [];
-        let currentFilter = 'all';
-        
-        function formatTime(timestamp) {
-            const date = new Date(timestamp * 1000);
-            const now = new Date();
-            const diff = now - date;
-            
-            if (diff < 60000) return 'Just now';
-            if (diff < 3600000) return Math.floor(diff / 60000) + ' min ago';
-            if (diff < 86400000) return Math.floor(diff / 3600000) + ' hr ago';
-            return date.toLocaleString();
-        }
-        
-        function getPriorityClass(priority) {
-            if (priority >= 8) return 'priority-high';
-            if (priority >= 5) return 'priority-medium';
-            return '';
-        }
-        
-        function renderEvents(eventsToShow) {
-            const container = document.getElementById('events-list');
-            
-            if (eventsToShow.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <h2>No events found</h2>
-                        <p>Events will appear here as they are detected</p>
-                    </div>
-                `;
-                return;
-            }
-            
-            container.innerHTML = eventsToShow.map(event => `
-                <div class="event-card ${getPriorityClass(event.priority || 5)}">
-                    <div class="event-header">
-                        <div>
-                            <div class="event-channel">${escapeHtml(event.channel || 'Unknown')}</div>
-                            <div class="event-time">${formatTime(event.timestamp)}</div>
-                        </div>
-                    </div>
-                    ${event.transcript ? `<div class="event-transcript">"${escapeHtml(event.transcript)}"</div>` : ''}
-                    ${event.keywords && event.keywords.length > 0 ? `
-                        <div class="event-keywords">
-                            ${event.keywords.map(kw => `<span class="keyword-badge">${escapeHtml(kw)}</span>`).join('')}
-                        </div>
-                    ` : ''}
-                </div>
-            `).join('');
-        }
-        
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-        
-        function filterEvents(filter) {
-            currentFilter = filter;
-            
-            // Update button states
-            document.querySelectorAll('.filter-btn').forEach(btn => {
-                btn.classList.remove('active');
-            });
-            event.target.classList.add('active');
-            
-            let filtered = [...allEvents];
-            
-            if (filter === 'high') {
-                filtered = filtered.filter(e => (e.priority || 5) >= 8);
-            } else if (filter === 'medium') {
-                filtered = filtered.filter(e => (e.priority || 5) >= 5 && (e.priority || 5) < 8);
-            } else if (filter === 'low') {
-                filtered = filtered.filter(e => (e.priority || 5) < 5);
-            } else if (filter === 'recent') {
-                const oneHourAgo = Date.now() / 1000 - 3600;
-                filtered = filtered.filter(e => e.timestamp >= oneHourAgo);
-            }
-            
-            renderEvents(filtered);
-        }
-        
-        async function fetchEvents() {
-            try {
-                const response = await fetch('/api/events?limit=100');
-                const data = await response.json();
-                
-                allEvents = data.events || [];
-                allEvents.sort((a, b) => b.timestamp - a.timestamp);
-                
-                document.getElementById('total-events').textContent = data.stats.total_events || 0;
-                document.getElementById('last-update').textContent = formatTime(Date.now() / 1000);
-                
-                // Re-apply current filter
-                if (currentFilter === 'all') {
-                    renderEvents(allEvents);
-                } else {
-                    filterEvents(currentFilter);
-                }
-            } catch (error) {
-                console.error('Error fetching events:', error);
-            }
-        }
-        
-        // Initial load
-        fetchEvents();
-        
-        // Auto-refresh every 5 seconds
-        setInterval(fetchEvents, 5000);
-    </script>
+          </div>
+        `;
+      }).join("");
+
+      container.querySelectorAll("button[data-action='toggle']").forEach(btn => {
+        btn.addEventListener("click", (ev) => {
+          const card = ev.target.closest(".event");
+          if (!card) return;
+          card.classList.toggle("expanded");
+          btn.textContent = card.classList.contains("expanded") ? "Collapse" : "Details";
+        });
+      });
+    }
+
+    function updateKpis(stats) {
+      document.getElementById("total-events").textContent = String((stats && stats.total_events) || 0);
+      document.getElementById("last-update").textContent = formatRel(Date.now() / 1000);
+      const lastEvent = (stats && stats.last_event_time) ? formatRel(stats.last_event_time) : "--";
+      document.getElementById("last-event").textContent = lastEvent;
+    }
+
+    function debounce(fn, ms) {
+      let t = null;
+      return (...args) => {
+        if (t) clearTimeout(t);
+        t = setTimeout(() => fn(...args), ms);
+      };
+    }
+
+    async function fetchEvents() {
+      try {
+        const params = new URLSearchParams();
+        params.set("limit", "100");
+
+        if (state.channel && state.channel !== "all") params.set("channel", state.channel);
+        if (state.search) params.set("keyword", state.search);
+        const since = rangeSince();
+        if (since) params.set("since", String(since));
+
+        const response = await fetch("/api/events?" + params.toString());
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const data = await response.json();
+
+        allEvents = (data.events || []).slice().sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        lastStats = data.stats || {};
+
+        updateKpis(lastStats);
+        populateChannels(lastStats);
+        render();
+        lastRefreshOk = true;
+        updateStatus(true);
+      } catch (e) {
+        lastRefreshOk = false;
+        updateStatus(false);
+        document.getElementById("events-list").innerHTML = `<div class="empty">Error loading events. Check server logs.</div>`;
+      }
+    }
+
+    document.getElementById("search").addEventListener("input", debounce((ev) => {
+      state.search = ev.target.value.trim();
+      fetchEvents();
+    }, 250));
+
+    document.getElementById("channel").addEventListener("change", (ev) => {
+      state.channel = ev.target.value;
+      fetchEvents();
+    });
+
+    document.getElementById("priority").addEventListener("change", (ev) => {
+      state.priority = ev.target.value;
+      render();
+    });
+
+    document.getElementById("range").addEventListener("change", (ev) => {
+      state.range = ev.target.value;
+      fetchEvents();
+    });
+
+    document.getElementById("refresh").addEventListener("click", () => fetchEvents());
+
+    // Initial load + auto-refresh
+    fetchEvents();
+    setInterval(fetchEvents, 5000);
+  </script>
 </body>
 </html>
 """
 
 
 @app.route('/')
+@require_dashboard_auth
 def dashboard():
     """Main dashboard page"""
     return render_template_string(DASHBOARD_TEMPLATE)
 
 
 @app.route('/api/events', methods=['GET'])
+@require_dashboard_auth
 def get_events():
     """Get events with optional filtering"""
     rebuild_stats_from_db()
@@ -720,6 +913,7 @@ def create_event():
 
 
 @app.route('/api/stats')
+@require_dashboard_auth
 def get_stats():
     """Get statistics"""
     rebuild_stats_from_db()
