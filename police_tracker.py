@@ -196,8 +196,9 @@ def transcribe_audio(audio_path: Path, model_name: str) -> str:
     if transcription_backend == "openai-whisper" and whisper_model is not None:
         try:
             # Prefer deterministic, fast-ish defaults.
-            # fp16 must be disabled on CPU; on MPS it may be flaky, so we retry if needed.
-            fp16 = whisper_device not in ("cpu",)
+            # fp16 must be disabled on CPU. On MPS, fp16 can silently produce empty transcripts on
+            # some Torch/Whisper builds (no exception), so we keep it off there too.
+            fp16 = whisper_device == "cuda"
             with transcription_lock:
                 try:
                     result = whisper_model.transcribe(
@@ -207,22 +208,11 @@ def transcribe_audio(audio_path: Path, model_name: str) -> str:
                         temperature=0.0,
                         fp16=fp16,
                         condition_on_previous_text=False,
-                        verbose=False,
+                        # whisper's Python API shows tqdm progress bars when verbose is False; use None to silence.
+                        verbose=None,
                     )
                 except Exception as e:
-                    if whisper_device == "mps" and fp16:
-                        logger.warning(f"Transcription failed with fp16 on MPS, retrying with fp16=False: {e}")
-                        result = whisper_model.transcribe(
-                            str(audio_path),
-                            language="en",
-                            task="transcribe",
-                            temperature=0.0,
-                            fp16=False,
-                            condition_on_previous_text=False,
-                            verbose=False,
-                        )
-                    else:
-                        raise
+                    raise
             return (result.get("text") or "").strip()
         except Exception as e:
             logger.error(f"Transcription failed: {e}")

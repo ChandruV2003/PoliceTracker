@@ -11,6 +11,11 @@ _tmp_dir = tempfile.TemporaryDirectory()
 _db_path = Path(_tmp_dir.name) / "policetracker_test.db"
 os.environ["DATABASE_PATH"] = str(_db_path)
 os.environ["API_TOKEN"] = "testtoken"
+# Disable dashboard/read API auth for this unit test run; we only validate API_TOKEN on POST here.
+# (web_server.py may load a local .env which sets DASHBOARD_PIN for real deployments.)
+os.environ["DASHBOARD_PIN"] = ""
+os.environ["DASHBOARD_USER"] = ""
+os.environ["DASHBOARD_PASS"] = ""
 
 import importlib
 import web_server  # noqa: E402
@@ -63,4 +68,3 @@ class TestWebAPI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
