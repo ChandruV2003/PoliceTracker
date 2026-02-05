@@ -58,7 +58,7 @@ http://YOUR_PUBLIC_IP:8892
 
 1. **Add Authentication** (future enhancement)
 2. **Protect event ingestion** by setting an `API_TOKEN` environment variable and using the same token in `config.local.yaml` under `alerts.api_token`
-3. **Protect the dashboard/read APIs** by setting `DASHBOARD_USER` and `DASHBOARD_PASS` (HTTP Basic Auth)
+3. **Protect the dashboard/read APIs** by setting `DASHBOARD_PIN` (PIN mode) or `DASHBOARD_USER` and `DASHBOARD_PASS` (HTTP Basic Auth)
 4. **Use HTTPS** (requires SSL certificate)
 5. **Firewall Rules** - Only allow specific IPs if possible
 6. **VPN Alternative** - Consider using a VPN instead of direct exposure

@@ -71,7 +71,12 @@ export API_TOKEN="your-secret-token"
 
 Then add the same token to `config.local.yaml` under `alerts.api_token` so the listener can authenticate.
 
-5. (Optional) Protect the dashboard + read APIs with Basic Auth:
+5. (Optional) Protect the dashboard + read APIs with a PIN (Basic Auth prompt):
+```bash
+export DASHBOARD_PIN="84346"
+```
+
+Or use a full username/password:
 ```bash
 export DASHBOARD_USER="admin"
 export DASHBOARD_PASS="set-a-strong-password"

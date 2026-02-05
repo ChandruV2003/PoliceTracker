@@ -13,6 +13,18 @@ BASE_URL = f"http://{WEB_HOST}:{WEB_PORT}"
 WEB_API_URL = f"{BASE_URL}/api/events"
 HEALTH_URL = f"{BASE_URL}/api/health"
 API_TOKEN = os.environ.get("API_TOKEN", "")
+DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "")
+DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS", "")
+DASHBOARD_PIN = os.environ.get("DASHBOARD_PIN", "")
+
+
+def get_dashboard_auth():
+    """Return requests auth tuple if dashboard protection is enabled."""
+    password = DASHBOARD_PASS or DASHBOARD_PIN
+    if not password:
+        return None
+    username = DASHBOARD_USER or "pin"
+    return (username, password)
 
 def test_api_connection():
     """Test if web API is running"""
@@ -66,7 +78,8 @@ def send_test_event(use_auth: bool = True):
 def get_events():
     """Retrieve events from API"""
     try:
-        response = requests.get(WEB_API_URL + "?limit=5", timeout=5)
+        auth = get_dashboard_auth()
+        response = requests.get(WEB_API_URL + "?limit=5", timeout=5, auth=auth)
         if response.status_code == 200:
             data = response.json()
             print(f"✅ Retrieved {len(data.get('events', []))} events")

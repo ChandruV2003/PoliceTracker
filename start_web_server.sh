@@ -8,6 +8,14 @@ if [ ! -d "venv" ]; then
     exit 1
 fi
 
+# Load environment variables from .env if present (not committed; safe for secrets)
+if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source ".env"
+    set +a
+fi
+
 source venv/bin/activate
 
 # Set port (default 8892, can override with WEB_PORT env var)

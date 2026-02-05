@@ -18,6 +18,7 @@ from flask import Flask, render_template_string, jsonify, request, Response
 from flask_cors import CORS
 from collections import deque
 import threading
+from dotenv import load_dotenv
 
 # Setup logging
 logging.basicConfig(
@@ -27,11 +28,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+load_dotenv()  # Allow configuring via .env in production
+
 app = Flask(__name__)
 CORS(app)  # Allow cross-origin requests for public access
 API_TOKEN = os.environ.get("API_TOKEN")
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER")
 DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS")
+DASHBOARD_PIN = os.environ.get("DASHBOARD_PIN")
+
+AUTH_WINDOW_SECONDS = int(os.environ.get("AUTH_WINDOW_SECONDS", "300"))
+AUTH_MAX_FAILURES = int(os.environ.get("AUTH_MAX_FAILURES", "8"))
+AUTH_LOCKOUT_SECONDS = int(os.environ.get("AUTH_LOCKOUT_SECONDS", "600"))
+auth_lock = threading.Lock()
+auth_failures: Dict[str, List[float]] = {}
+auth_locked_until: Dict[str, float] = {}
 
 
 def require_dashboard_auth(handler):
@@ -39,18 +50,51 @@ def require_dashboard_auth(handler):
 
     @wraps(handler)
     def wrapper(*args, **kwargs):
-        if not (DASHBOARD_USER and DASHBOARD_PASS):
+        pin_mode = bool(DASHBOARD_PIN)
+        userpass_mode = bool(DASHBOARD_USER and DASHBOARD_PASS)
+        if not (pin_mode or userpass_mode):
             return handler(*args, **kwargs)
+
+        client_ip = request.remote_addr or "unknown"
+        now = time.time()
+
+        with auth_lock:
+            locked_until = auth_locked_until.get(client_ip, 0)
+            if now < locked_until:
+                retry_after = max(1, int(locked_until - now))
+                return Response(
+                    "Too Many Requests",
+                    429,
+                    {"Retry-After": str(retry_after)},
+                )
 
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Basic "):
             try:
                 decoded = b64decode(auth.split(" ", 1)[1]).decode("utf-8")
                 username, password = decoded.split(":", 1)
-                if username == DASHBOARD_USER and password == DASHBOARD_PASS:
+                if pin_mode and password == DASHBOARD_PIN:
+                    with auth_lock:
+                        auth_failures.pop(client_ip, None)
+                        auth_locked_until.pop(client_ip, None)
+                    return handler(*args, **kwargs)
+                if userpass_mode and username == DASHBOARD_USER and password == DASHBOARD_PASS:
+                    with auth_lock:
+                        auth_failures.pop(client_ip, None)
+                        auth_locked_until.pop(client_ip, None)
                     return handler(*args, **kwargs)
             except Exception:
                 pass
+
+        # Track failures and lock out obvious brute-force attempts.
+        with auth_lock:
+            failures = auth_failures.get(client_ip, [])
+            failures = [t for t in failures if now - t <= AUTH_WINDOW_SECONDS]
+            failures.append(now)
+            auth_failures[client_ip] = failures
+            if len(failures) >= AUTH_MAX_FAILURES:
+                auth_failures.pop(client_ip, None)
+                auth_locked_until[client_ip] = now + AUTH_LOCKOUT_SECONDS
 
         return Response(
             "Unauthorized",
