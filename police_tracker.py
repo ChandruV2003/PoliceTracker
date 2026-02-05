@@ -12,6 +12,7 @@ import time
 import uuid
 import wave
 import shutil
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import yaml
@@ -46,14 +47,39 @@ api_token: Optional[str] = None
 processing_config: Dict = {}
 transcription_backend: Optional[str] = None
 whisper_model = None
+whisper_device: str = "cpu"
+transcription_lock = threading.Lock()
 
 
 def init_transcription_backend(model_name: str) -> Tuple[Optional[str], Optional[object]]:
     """Initialize transcription backend if available."""
     try:
         import whisper  # type: ignore
+        import torch  # type: ignore
+
+        device = "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            device = "mps"
+
         model = whisper.load_model(model_name)
-        logger.info("Using openai-whisper backend for transcription")
+        # Whisper ships a sparse alignment_heads buffer which breaks .to("mps") on some torch builds.
+        try:
+            if hasattr(model, "alignment_heads") and isinstance(model.alignment_heads, torch.Tensor) and model.alignment_heads.is_sparse:
+                model.alignment_heads = model.alignment_heads.to_dense()
+        except Exception as e:
+            logger.warning(f"Failed to densify alignment_heads buffer: {e}")
+        try:
+            model = model.to(device)
+        except Exception as e:
+            logger.warning(f"Failed to move whisper model to {device}: {e}. Falling back to CPU.")
+            device = "cpu"
+            model = model.to(device)
+
+        global whisper_device
+        whisper_device = device
+        logger.info(f"Using openai-whisper backend on {device} for transcription (model={model_name})")
         return "openai-whisper", model
     except Exception as e:
         logger.warning(f"Transcription backend not available: {e}")
@@ -162,11 +188,41 @@ def transcribe_audio(audio_path: Path, model_name: str) -> str:
     global transcription_backend, whisper_model
 
     if not transcription_backend:
-        transcription_backend, whisper_model = init_transcription_backend(model_name)
+        # Avoid racing multiple model loads on startup when several channels begin at once.
+        with transcription_lock:
+            if not transcription_backend:
+                transcription_backend, whisper_model = init_transcription_backend(model_name)
 
     if transcription_backend == "openai-whisper" and whisper_model is not None:
         try:
-            result = whisper_model.transcribe(str(audio_path))
+            # Prefer deterministic, fast-ish defaults.
+            # fp16 must be disabled on CPU; on MPS it may be flaky, so we retry if needed.
+            fp16 = whisper_device not in ("cpu",)
+            with transcription_lock:
+                try:
+                    result = whisper_model.transcribe(
+                        str(audio_path),
+                        language="en",
+                        task="transcribe",
+                        temperature=0.0,
+                        fp16=fp16,
+                        condition_on_previous_text=False,
+                        verbose=False,
+                    )
+                except Exception as e:
+                    if whisper_device == "mps" and fp16:
+                        logger.warning(f"Transcription failed with fp16 on MPS, retrying with fp16=False: {e}")
+                        result = whisper_model.transcribe(
+                            str(audio_path),
+                            language="en",
+                            task="transcribe",
+                            temperature=0.0,
+                            fp16=False,
+                            condition_on_previous_text=False,
+                            verbose=False,
+                        )
+                    else:
+                        raise
             return (result.get("text") or "").strip()
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
@@ -183,6 +239,13 @@ def write_wav(path: Path, pcm_data: bytes, sample_rate: int, channels: int, samp
         wf.setsampwidth(int(sample_width))
         wf.setframerate(int(sample_rate))
         wf.writeframes(pcm_data)
+
+
+def safe_basename(name: str) -> str:
+    """Make a name safe for use as a filename."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
+    safe = re.sub(r"_+", "_", safe).strip("_.-")
+    return safe or "channel"
 
 
 class ChannelMonitor:
@@ -282,6 +345,9 @@ class ChannelMonitor:
                     data = self.process.stdout.read(chunk_size)
                     if not data:
                         break
+                    # Guard against short/partial reads which can confuse transcription.
+                    if len(data) < int(bytes_per_second * 2):
+                        continue
 
                     self.last_audio_time = time.time()
                     if not use_transcription:
@@ -291,7 +357,7 @@ class ChannelMonitor:
                         continue
 
                     chunk_id = uuid.uuid4().hex
-                    audio_path = AUDIO_CACHE_DIR / f"{self.name.replace(' ', '_')}_{chunk_id}.wav"
+                    audio_path = AUDIO_CACHE_DIR / f"{safe_basename(self.name)}_{chunk_id}.wav"
                     write_wav(audio_path, data, sample_rate, channels, sample_width)
 
                     transcript = transcribe_audio(audio_path, model_name)
