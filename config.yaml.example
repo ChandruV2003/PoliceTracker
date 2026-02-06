@@ -35,6 +35,16 @@ processing:
   audio_chunk_duration: 10  # seconds per chunk for processing
   keyword_match_threshold: 0.8  # confidence threshold for keyword matching
   sample_rate: 16000  # audio sample rate for processing
+  # False-positive controls (recommended when using public feeds that may contain ad inserts)
+  min_transcript_length: 18  # ignore very short/empty transcripts
+  ad_block_enabled: true  # suppress obvious ad reads (best-effort)
+  gate_ambiguous_single_words: true  # require dispatch context for certain single-word keywords
+  ambiguous_single_word_keywords:
+    - "shooting"
+    - "robbery"
+    - "armed"
+    - "pursuit"
+  keyword_cooldown_seconds: 180  # per-channel cooldown per keyword (prevents spam)
 
 # Server settings
 server:
