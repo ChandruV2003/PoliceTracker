@@ -183,6 +183,129 @@ def detect_keywords(transcript: str, keywords: List[str], threshold: float) -> L
     return detected
 
 
+def looks_like_ad(transcript_lc: str) -> bool:
+    """Best-effort filter for Broadcastify-style ad inserts.
+
+    We keep this intentionally conservative: it should only suppress very obvious ad reads.
+    """
+    if not transcript_lc:
+        return False
+
+    strong_phrases = (
+        "promo code",
+        "terms and conditions",
+        "sponsored by",
+        "download the app",
+        "download the",
+        "use code",
+        "kalshi",
+        "sportsbook",
+    )
+    if any(p in transcript_lc for p in strong_phrases):
+        # Require a second hint for generic phrases like "use code" or "download the"
+        if "promo code" in transcript_lc or "terms and conditions" in transcript_lc or "sponsored by" in transcript_lc:
+            return True
+        if "download" in transcript_lc and ("promo" in transcript_lc or "code" in transcript_lc):
+            return True
+        if "kalshi" in transcript_lc:
+            return True
+
+    return False
+
+
+def has_dispatch_context(transcript_lc: str) -> bool:
+    """Heuristic: does this sound like an actual dispatch call vs generic chatter/ads?"""
+    if not transcript_lc:
+        return False
+
+    dispatch_markers = (
+        "dispatch",
+        "respond",
+        "responding",
+        "en route",
+        "caller",
+        "reports",
+        "reported",
+        "be advised",
+        "units",
+        "unit",
+        "copy",
+        "received",
+        "staging",
+        "on scene",
+    )
+    if any(m in transcript_lc for m in dispatch_markers):
+        return True
+
+    # Location-ish phrases + a number (e.g., "route 22", "exit 9", "123 main st")
+    location_markers = (
+        "route",
+        "rt ",
+        "highway",
+        "turnpike",
+        "parkway",
+        "exit",
+        "mile",
+        "intersection",
+        "street",
+        " st",
+        "road",
+        " rd",
+        "avenue",
+        " ave",
+        "boulevard",
+        " blvd",
+        "township",
+        "county",
+    )
+    if any(m in transcript_lc for m in location_markers):
+        if re.search(r"\\b\\d{1,5}\\b", transcript_lc):
+            return True
+
+    return False
+
+
+def apply_detection_filters(transcript: str, detected_keywords: List[str], cfg: Dict) -> List[str]:
+    """Filter/clean detected keywords to reduce obvious false positives."""
+    if not detected_keywords:
+        return []
+
+    transcript = (transcript or "").strip()
+    if not transcript:
+        return []
+
+    min_len = int(cfg.get("min_transcript_length", 18))
+    if len(transcript) < min_len:
+        return []
+
+    transcript_lc = transcript.lower()
+
+    if bool(cfg.get("ad_block_enabled", True)) and looks_like_ad(transcript_lc):
+        return []
+
+    # Only gate a small set of ambiguous single-word keywords to avoid missing real incidents.
+    ambiguous_single_words = set(
+        (cfg.get("ambiguous_single_word_keywords") or ["shooting", "robbery", "armed", "pursuit"])
+    )
+    gate_ambiguous = bool(cfg.get("gate_ambiguous_single_words", True))
+    if not gate_ambiguous:
+        return detected_keywords
+
+    if not has_dispatch_context(transcript_lc):
+        filtered = []
+        for kw in detected_keywords:
+            kw_lc = kw.lower().strip()
+            if " " in kw_lc:
+                filtered.append(kw)  # phrases are usually safer
+                continue
+            if kw_lc in ambiguous_single_words:
+                continue
+            filtered.append(kw)
+        return filtered
+
+    return detected_keywords
+
+
 def transcribe_audio(audio_path: Path, model_name: str) -> str:
     """Transcribe audio using configured backend."""
     global transcription_backend, whisper_model
@@ -251,6 +374,7 @@ class ChannelMonitor:
         self.last_error: Optional[str] = None
         self.last_audio_time: Optional[float] = None
         self.last_event_time: Optional[float] = None
+        self.last_keyword_event_times: Dict[str, float] = {}
         self.process: Optional[subprocess.Popen] = None
         self.thread: Optional[threading.Thread] = None
         self.running = False
@@ -274,6 +398,8 @@ class ChannelMonitor:
             location=self.location
         )
         self.last_event_time = time.time()
+        for kw in detected_keywords:
+            self.last_keyword_event_times[str(kw).lower().strip()] = self.last_event_time
         
     def start(self):
         """Start monitoring this channel"""
@@ -300,6 +426,7 @@ class ChannelMonitor:
         sample_width = 2
         chunk_duration = float(processing_config.get("audio_chunk_duration", 10))
         threshold = float(processing_config.get("keyword_match_threshold", 0.8))
+        keyword_cooldown_seconds = float(processing_config.get("keyword_cooldown_seconds", 180))
         use_transcription = bool(processing_config.get("use_transcription", False))
         model_name = processing_config.get("transcription_model", "base")
         bytes_per_second = sample_rate * channels * sample_width
@@ -352,8 +479,23 @@ class ChannelMonitor:
 
                     transcript = transcribe_audio(audio_path, model_name)
                     detected_keywords = detect_keywords(transcript, self.keywords, threshold)
+                    detected_keywords = apply_detection_filters(transcript, detected_keywords, processing_config)
                     if detected_keywords:
-                        self.trigger_event(detected_keywords, transcript, priority=self.priority)
+                        now = time.time()
+                        should_emit = False
+                        for kw in detected_keywords:
+                            key = str(kw).lower().strip()
+                            last = self.last_keyword_event_times.get(key, 0.0)
+                            if now - last >= keyword_cooldown_seconds:
+                                should_emit = True
+                                break
+
+                        if should_emit:
+                            self.trigger_event(detected_keywords, transcript, priority=self.priority)
+                        else:
+                            logger.info(
+                                f"Suppressed duplicate keywords on {self.name} within cooldown ({int(keyword_cooldown_seconds)}s): {detected_keywords}"
+                            )
 
                     try:
                         audio_path.unlink(missing_ok=True)
