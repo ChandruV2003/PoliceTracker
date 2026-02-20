@@ -42,7 +42,7 @@ DASHBOARD_PIN = os.environ.get("DASHBOARD_PIN")
 
 # Optional: background geocoding (v2). Uses a public service by default, so keep requests low.
 ENABLE_GEOCODING = os.environ.get("ENABLE_GEOCODING", "1") == "1"
-GEOCODER_PROVIDER = os.environ.get("GEOCODER_PROVIDER", "nominatim")
+GEOCODER_PROVIDER = os.environ.get("GEOCODER_PROVIDER", "census")
 GEOCODER_TIMEOUT_SECONDS = float(os.environ.get("GEOCODER_TIMEOUT_SECONDS", "3"))
 GEOCODER_MIN_INTERVAL_SECONDS = float(os.environ.get("GEOCODER_MIN_INTERVAL_SECONDS", "1"))
 GEOCODER_USER_AGENT = os.environ.get(
@@ -630,6 +630,42 @@ def geocode_nominatim(query: str) -> Optional[Dict]:
     return {"lat": lat, "lon": lon, "confidence": confidence, "provider": "nominatim"}
 
 
+def geocode_census(query: str) -> Optional[Dict]:
+    """Geocode using the US Census Geocoder (best for full US street addresses)."""
+    params = {
+        "address": query,
+        "benchmark": "2020",
+        "format": "json",
+    }
+    headers = {"User-Agent": GEOCODER_USER_AGENT}
+    resp = requests.get(
+        "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress",
+        params=params,
+        headers=headers,
+        timeout=GEOCODER_TIMEOUT_SECONDS,
+    )
+    if resp.status_code != 200:
+        return None
+    data = resp.json() or {}
+    matches = ((data.get("result") or {}).get("addressMatches") or [])
+    if not matches:
+        return None
+    m = matches[0] or {}
+    coords = m.get("coordinates") or {}
+    try:
+        lon = float(coords.get("x"))
+        lat = float(coords.get("y"))
+    except Exception:
+        return None
+
+    addr = m.get("addressComponents") or {}
+    state = str(addr.get("state") or "").strip().lower()
+    if state and state != "nj":
+        return None
+
+    return {"lat": lat, "lon": lon, "confidence": 0.75, "provider": "census", "matched": m.get("matchedAddress")}
+
+
 # Background geocoding worker (v2)
 geocode_queue: "queue.Queue[Dict]" = queue.Queue(maxsize=500)
 _geocode_thread_started = False
@@ -672,7 +708,11 @@ def geocode_worker() -> None:
                 )
                 continue
 
-            if GEOCODER_PROVIDER != "nominatim":
+            provider = (GEOCODER_PROVIDER or "").strip().lower()
+            if provider == "census" and not re.search(r"\d", hint):
+                # Census geocoder needs a proper street address.
+                continue
+            if provider not in {"nominatim", "census"}:
                 continue
 
             # Simple global rate limit.
@@ -683,7 +723,10 @@ def geocode_worker() -> None:
                     time.sleep(sleep_for)
                 _geocode_last_request_at = time.time()
 
-            result = geocode_nominatim(hint)
+            if provider == "nominatim":
+                result = geocode_nominatim(hint)
+            else:
+                result = geocode_census(hint)
             if not result:
                 continue
 
@@ -692,13 +735,13 @@ def geocode_worker() -> None:
                 result["lat"],
                 result["lon"],
                 result.get("confidence"),
-                result.get("provider") or "nominatim",
+                result.get("provider") or provider,
             )
             update_event_geo(
                 event_id,
                 result["lat"],
                 result["lon"],
-                result.get("provider") or "nominatim",
+                result.get("provider") or provider,
                 result.get("confidence"),
                 hint,
             )
