@@ -16,6 +16,8 @@ os.environ["API_TOKEN"] = "testtoken"
 os.environ["DASHBOARD_PIN"] = ""
 os.environ["DASHBOARD_USER"] = ""
 os.environ["DASHBOARD_PASS"] = ""
+# Avoid network access during unit tests (geocoding worker).
+os.environ["ENABLE_GEOCODING"] = "0"
 
 import importlib
 import web_server  # noqa: E402

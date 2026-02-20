@@ -86,7 +86,19 @@ def init_transcription_backend(model_name: str) -> Tuple[Optional[str], Optional
         return None, None
 
 
-def send_event_to_api(channel: str, keywords: List[str], transcript: str = "", priority: int = 5, location: str = "", api_url: Optional[str] = None):
+def send_event_to_api(
+    channel: str,
+    keywords: List[str],
+    transcript: str = "",
+    priority: int = 5,
+    location: str = "",
+    api_url: Optional[str] = None,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    geo_source: str = "channel",
+    geo_confidence: float = 0.25,
+    geo_query: str = "",
+):
     """Send detected event to web API"""
     api_endpoint = api_url or web_api_url
     
@@ -102,6 +114,13 @@ def send_event_to_api(channel: str, keywords: List[str], transcript: str = "", p
         "priority": priority,
         "location": location
     }
+
+    if lat is not None and lon is not None:
+        event_data["lat"] = float(lat)
+        event_data["lon"] = float(lon)
+        event_data["geo_source"] = geo_source
+        event_data["geo_confidence"] = float(geo_confidence)
+        event_data["geo_query"] = geo_query or location
     
     headers = {}
     if api_token:
@@ -120,7 +139,19 @@ def send_event_to_api(channel: str, keywords: List[str], transcript: str = "", p
         return False
 
 
-def send_event_to_webhook(channel: str, keywords: List[str], transcript: str = "", priority: int = 5, location: str = "", webhook: Optional[str] = None):
+def send_event_to_webhook(
+    channel: str,
+    keywords: List[str],
+    transcript: str = "",
+    priority: int = 5,
+    location: str = "",
+    webhook: Optional[str] = None,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    geo_source: str = "channel",
+    geo_confidence: float = 0.25,
+    geo_query: str = "",
+):
     """Send detected event to webhook"""
     endpoint = webhook or webhook_url
     if not endpoint:
@@ -134,6 +165,12 @@ def send_event_to_webhook(channel: str, keywords: List[str], transcript: str = "
         "priority": priority,
         "location": location
     }
+    if lat is not None and lon is not None:
+        payload["lat"] = float(lat)
+        payload["lon"] = float(lon)
+        payload["geo_source"] = geo_source
+        payload["geo_confidence"] = float(geo_confidence)
+        payload["geo_query"] = geo_query or location
     try:
         response = requests.post(endpoint, json=payload, timeout=5)
         if 200 <= response.status_code < 300:
@@ -306,6 +343,66 @@ def apply_detection_filters(transcript: str, detected_keywords: List[str], cfg: 
     return detected_keywords
 
 
+def approximate_channel_center(channel_name: str, location: str) -> Optional[Tuple[float, float]]:
+    """Return an approximate (lat, lon) for a channel to power a coarse map view (v1).
+
+    This is intentionally rough. It prefers explicit city/county names and falls back to broad NJ regions.
+    """
+    channel_lc = (channel_name or "").lower()
+    loc_lc = (location or "").lower()
+
+    # A small NJ-focused lookup. Add more as needed.
+    # Sources: public city/county centroids (approx) and common regional anchors.
+    lookup = {
+        # Cities
+        "newark": (40.7357, -74.1724),
+        "jersey city": (40.7178, -74.0431),
+        "trenton": (40.2204, -74.7643),
+        # Counties (approx centroids)
+        "essex county": (40.7876, -74.2452),
+        "somerset county": (40.5606, -74.6400),
+        "ocean county": (39.9153, -74.2846),
+        "camden county": (39.8023, -74.9517),
+        "burlington county": (39.8395, -74.7173),
+        "gloucester county": (39.7176, -75.1410),
+        "atlantic county": (39.4778, -74.6338),
+        "mercer county": (40.2829, -74.7027),
+        # Regions
+        "north nj": (40.8850, -74.2700),
+        "central nj": (40.3573, -74.5082),
+        "south nj": (39.8200, -74.9900),
+        "statewide nj": (40.0583, -74.4057),
+    }
+
+    # Prefer explicit city hints in the channel name first
+    for key in ("newark", "jersey city", "trenton"):
+        if key in channel_lc:
+            return lookup[key]
+
+    # Then look at the location string
+    for key, coords in lookup.items():
+        if key in loc_lc:
+            return coords
+
+    # Finally, look for county names in the channel name if location is generic
+    for key, coords in lookup.items():
+        if "county" in key and key.split(" county", 1)[0] in channel_lc:
+            return coords
+
+    if "troop a" in channel_lc:
+        return lookup["north nj"]
+    if "troop b" in channel_lc:
+        return lookup["central nj"]
+    if "troop c" in channel_lc:
+        return lookup["south nj"]
+
+    # Default: center of NJ
+    if "nj" in channel_lc or "new jersey" in channel_lc or "nj" in loc_lc:
+        return lookup["statewide nj"]
+
+    return None
+
+
 def transcribe_audio(audio_path: Path, model_name: str) -> str:
     """Transcribe audio using configured backend."""
     global transcription_backend, whisper_model
@@ -383,19 +480,32 @@ class ChannelMonitor:
     def trigger_event(self, detected_keywords: List[str], transcript: str = "", priority: int = 5):
         """Trigger an event when keywords are detected"""
         logger.info(f"Event detected on {self.name}: {detected_keywords}")
+        center = approximate_channel_center(self.name, self.location)
+        lat = center[0] if center else None
+        lon = center[1] if center else None
         send_event_to_api(
             channel=self.name,
             keywords=detected_keywords,
             transcript=transcript,
             priority=priority,
-            location=self.location
+            location=self.location,
+            lat=lat,
+            lon=lon,
+            geo_source="channel",
+            geo_confidence=0.25,
+            geo_query=self.location,
         )
         send_event_to_webhook(
             channel=self.name,
             keywords=detected_keywords,
             transcript=transcript,
             priority=priority,
-            location=self.location
+            location=self.location,
+            lat=lat,
+            lon=lon,
+            geo_source="channel",
+            geo_confidence=0.25,
+            geo_query=self.location,
         )
         self.last_event_time = time.time()
         for kw in detected_keywords:
