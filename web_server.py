@@ -542,6 +542,93 @@ def extract_location_hint(transcript: str, context: str = "") -> Optional[str]:
     return None
 
 
+def approximate_channel_center(channel_name: str, location: str) -> Optional[tuple]:
+    """Return an approximate (lat, lon) for a channel to power a coarse map view (v1)."""
+    channel_lc = (channel_name or "").lower()
+    loc_lc = (location or "").lower()
+
+    lookup = {
+        # Cities
+        "newark": (40.7357, -74.1724),
+        "jersey city": (40.7178, -74.0431),
+        "trenton": (40.2204, -74.7643),
+        # Counties (approx centroids)
+        "essex county": (40.7876, -74.2452),
+        "somerset county": (40.5606, -74.6400),
+        "ocean county": (39.9153, -74.2846),
+        "camden county": (39.8023, -74.9517),
+        "burlington county": (39.8395, -74.7173),
+        "gloucester county": (39.7176, -75.1410),
+        "atlantic county": (39.4778, -74.6338),
+        "mercer county": (40.2829, -74.7027),
+        "hudson county": (40.7453, -74.0535),
+        # Regions
+        "north nj": (40.8850, -74.2700),
+        "central nj": (40.3573, -74.5082),
+        "south nj": (39.8200, -74.9900),
+        "statewide nj": (40.0583, -74.4057),
+    }
+
+    for key in ("newark", "jersey city", "trenton"):
+        if key in channel_lc:
+            return lookup[key]
+
+    for key, coords in lookup.items():
+        if key in loc_lc:
+            return coords
+
+    if "troop a" in channel_lc:
+        return lookup["north nj"]
+    if "troop b" in channel_lc:
+        return lookup["central nj"]
+    if "troop c" in channel_lc:
+        return lookup["south nj"]
+
+    if "nj" in channel_lc or "new jersey" in channel_lc or "nj" in loc_lc:
+        return lookup["statewide nj"]
+
+    return None
+
+
+def backfill_missing_geo(max_rows: int = 20000) -> int:
+    """Best-effort backfill for older DB rows that predate geo fields."""
+    with db_lock:
+        rows = db_conn.execute(
+            "SELECT id, channel, location FROM events WHERE (lat IS NULL OR lon IS NULL) AND (geo_source IS NULL OR geo_source = '') LIMIT ?",
+            (int(max_rows),),
+        ).fetchall()
+
+    updates = []
+    for row in rows:
+        center = approximate_channel_center(row["channel"], row["location"] or "")
+        if not center:
+            continue
+        updates.append(
+            (
+                float(center[0]),
+                float(center[1]),
+                "channel",
+                0.25,
+                (row["location"] or row["channel"]),
+                time.time(),
+                int(row["id"]),
+            )
+        )
+
+    if not updates:
+        return 0
+
+    with db_lock:
+        db_conn.executemany(
+            "UPDATE events SET lat = ?, lon = ?, geo_source = ?, geo_confidence = ?, geo_query = ?, geo_updated_at = ? WHERE id = ?",
+            updates,
+        )
+        db_conn.commit()
+
+    logger.info(f"Backfilled geo for {len(updates)} event(s)")
+    return len(updates)
+
+
 def normalize_geocode_query(query: str) -> str:
     return " ".join((query or "").strip().lower().split())
 
@@ -767,6 +854,7 @@ def start_geocode_worker_once() -> None:
 
 # Initialize persistence + caches on import (works for both direct run and gunicorn)
 init_db()
+backfill_missing_geo()
 load_recent_events_into_memory()
 rebuild_stats_from_db()
 logger.info(f"Using SQLite database at: {DB_PATH}")
