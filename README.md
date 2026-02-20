@@ -8,6 +8,8 @@ Automatic listener for police radio channels that monitors Broadcastify (and sim
 - Keyword detection from transcribed audio
 - Optional speech-to-text transcription (Whisper)
 - Webhook/API integration for notifications
+- Utilitarian, mobile-friendly public dashboard (PIN-protected option)
+- Live map view (v1 coarse channel centroids, v2 optional address geocoding)
 - Lightweight resource usage (<5% CPU per channel)
 
 ## Setup
@@ -80,6 +82,21 @@ Or use a full username/password:
 ```bash
 export DASHBOARD_USER="admin"
 export DASHBOARD_PASS="set-a-strong-password"
+```
+
+## Map + Geocoding (v1/v2)
+
+- **v1 (coarse map):** the listener attaches approximate `lat/lon` per channel/region so events plot immediately (county/city centroid style).
+- **v2 (refine):** the web server can optionally extract an address-like hint from the transcript and geocode it in the background.
+
+By default, v2 uses the **US Census Geocoder** (`GEOCODER_PROVIDER=census`) and only attempts geocoding when the hint contains digits (street-address style). Results are cached in SQLite (`geocode_cache`) and written back to the event’s `lat/lon`.
+
+Environment variables:
+```bash
+export ENABLE_GEOCODING="1"            # default: 1
+export GEOCODER_PROVIDER="census"      # census|nominatim
+export GEOCODER_TIMEOUT_SECONDS="3"
+export GEOCODER_MIN_INTERVAL_SECONDS="1"
 ```
 
 ## Transcription
