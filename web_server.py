@@ -970,6 +970,16 @@ DASHBOARD_TEMPLATE = """
       box-shadow: 0 0 0 2px rgba(220,38,38,.15);
     }
 
+    .dot.warn {
+      background: var(--warn);
+      box-shadow: 0 0 0 2px rgba(217,119,6,.15);
+    }
+
+    .dot.disabled {
+      background: rgba(148,163,184,.45);
+      box-shadow: 0 0 0 2px rgba(148,163,184,.12);
+    }
+
     .kpis {
       display: grid;
       grid-auto-flow: column;
@@ -1203,9 +1213,27 @@ DASHBOARD_TEMPLATE = """
 	      color: var(--muted);
 	      font-size: 12px;
 	    }
-	    .map-title { font-family: var(--mono); color: var(--text); font-weight: 800; }
-	    #map { height: 360px; width: 100%; }
-	    @media (max-width: 640px) { #map { height: 280px; } }
+		    .map-title { font-family: var(--mono); color: var(--text); font-weight: 800; }
+		    #map { height: 360px; width: 100%; }
+		    @media (max-width: 640px) { #map { height: 280px; } }
+
+		    .feeds-panel { overflow: hidden; }
+		    #feeds-list { padding: 10px 12px; display: grid; gap: 8px; }
+		    .feed {
+		      border: 1px solid var(--border);
+		      border-radius: 10px;
+		      padding: 8px 10px;
+		      display: grid;
+		      gap: 6px;
+		      background: var(--panel);
+		    }
+		    .feed-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+		    .feed-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+		    .feed-name { font-weight: 800; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		    .feed-meta { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+		    .feed-error { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+		    .feed-url { font-family: var(--mono); font-size: 11px; color: var(--muted); opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		    .feed-loc { font-family: var(--mono); font-size: 11px; color: var(--muted); opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     .empty {
       padding: 40px 12px;
@@ -1275,22 +1303,35 @@ DASHBOARD_TEMPLATE = """
 	      <button id="refresh" type="button">Refresh</button>
 	    </section>
 
-	    <section class="panel map-panel">
-	      <div class="map-header">
-	        <div class="map-title">Map</div>
-	        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-	          <span><span id="map-count">0</span> plotted</span>
-	          <button id="fit-map" class="linkbtn" type="button">Fit</button>
-	        </div>
-	      </div>
-	      <div id="map"></div>
-	    </section>
+		    <section class="panel map-panel">
+		      <div class="map-header">
+		        <div class="map-title">Map</div>
+		        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+		          <span><span id="map-count">0</span> plotted</span>
+		          <button id="fit-map" class="linkbtn" type="button">Fit</button>
+		        </div>
+		      </div>
+		      <div id="map"></div>
+		    </section>
 
-	    <section class="panel events">
-	      <div class="events-header">
-	        <div><span id="result-count">0</span> events loaded</div>
-	        <div style="font-family: var(--mono);">GET /api/events</div>
-	      </div>
+		    <section class="panel feeds-panel">
+		      <div class="map-header">
+		        <div class="map-title">Feeds</div>
+		        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+		          <span id="feeds-summary">--</span>
+		          <button id="feeds-toggle" class="linkbtn" type="button">Only problems</button>
+		        </div>
+		      </div>
+		      <div id="feeds-list">
+		        <div class="empty">Loading...</div>
+		      </div>
+		    </section>
+
+		    <section class="panel events">
+		      <div class="events-header">
+		        <div><span id="result-count">0</span> events loaded</div>
+		        <div style="font-family: var(--mono);">GET /api/events</div>
+		      </div>
       <div id="events-list">
         <div class="empty">Loading...</div>
       </div>
@@ -1306,9 +1347,11 @@ DASHBOARD_TEMPLATE = """
       range: "all"
     };
 
-    let allEvents = [];
-    let lastStats = {};
-    let lastRefreshOk = true;
+	    let allEvents = [];
+	    let lastStats = {};
+	    let lastRefreshOk = true;
+	    let lastFeeds = [];
+	    let feedsOnlyProblems = false;
 
     // Theme + map state
     const THEME_KEY = "pt_theme";
@@ -1438,14 +1481,141 @@ DASHBOARD_TEMPLATE = """
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         const data = await resp.json();
         const channels = Array.isArray(data.channels) ? data.channels : [];
+
+        lastFeeds = channels;
+
         const enabled = channels.filter(c => c && c.enabled);
         const running = enabled.filter(c => c && c.running);
         const cov = document.getElementById("coverage");
         if (cov) cov.textContent = "Coverage " + running.length + "/" + enabled.length + " feeds";
+
+        const summaryEl = document.getElementById("feeds-summary");
+        if (summaryEl) {
+          const bad = enabled.filter(c => feedState(c).kind === "down").length;
+          const warn = enabled.filter(c => feedState(c).kind === "warn").length;
+          summaryEl.textContent = `${running.length}/${enabled.length} running • ${bad} down • ${warn} warn`;
+        }
+
+        renderFeeds(channels);
       } catch (e) {
         const cov = document.getElementById("coverage");
         if (cov) cov.textContent = "Coverage unavailable";
+
+        const summaryEl = document.getElementById("feeds-summary");
+        if (summaryEl) summaryEl.textContent = "Unavailable";
+
+        const container = document.getElementById("feeds-list");
+        if (container) container.innerHTML = `<div class="empty">Listener unavailable.</div>`;
       }
+    }
+
+    function formatAge(seconds) {
+      if (seconds === null || seconds === undefined) return "--";
+      const s = Number(seconds);
+      if (!Number.isFinite(s)) return "--";
+      if (s < 60) return Math.round(s) + "s";
+      if (s < 3600) return Math.round(s / 60) + "m";
+      return Math.round(s / 3600) + "h";
+    }
+
+    function feedState(c) {
+      if (!c || !c.enabled) {
+        return { kind: "disabled", dotClass: "disabled", label: "DISABLED", pillClass: "" };
+      }
+
+      const running = Boolean(c.running);
+      const age = (c.audio_age_s === null || c.audio_age_s === undefined) ? NaN : Number(c.audio_age_s);
+      const hasAge = Number.isFinite(age);
+      const hasErr = Boolean(c.last_error);
+
+      if (!running) return { kind: "down", dotClass: "offline", label: "DOWN", pillClass: "prio-high" };
+      if (!hasAge) return { kind: "down", dotClass: "offline", label: "NO AUDIO", pillClass: "prio-high" };
+
+      if (age > 45 || (hasErr && age > 20)) return { kind: "down", dotClass: "offline", label: "STALE", pillClass: "prio-high" };
+      if (age > 15 || hasErr) return { kind: "warn", dotClass: "warn", label: "WARN", pillClass: "prio-med" };
+      return { kind: "ok", dotClass: "", label: "OK", pillClass: "" };
+    }
+
+    function renderFeeds(channels) {
+      const container = document.getElementById("feeds-list");
+      if (!container) return;
+
+      const list = Array.isArray(channels) ? channels.slice() : [];
+      if (!list.length) {
+        container.innerHTML = `<div class="empty">No feeds configured.</div>`;
+        return;
+      }
+
+      function severityRank(kind) {
+        if (kind === "down") return 3;
+        if (kind === "warn") return 2;
+        if (kind === "ok") return 1;
+        return 0; // disabled
+      }
+
+      list.sort((a, b) => {
+        const sa = feedState(a);
+        const sb = feedState(b);
+        const ra = severityRank(sa.kind);
+        const rb = severityRank(sb.kind);
+        if (ra !== rb) return rb - ra;
+
+        const aa = (a && a.audio_age_s !== null && a.audio_age_s !== undefined) ? Number(a.audio_age_s) : -1;
+        const ab = (b && b.audio_age_s !== null && b.audio_age_s !== undefined) ? Number(b.audio_age_s) : -1;
+        if (Number.isFinite(aa) && Number.isFinite(ab) && aa !== ab) return ab - aa;
+
+        const na = String((a && a.name) || "");
+        const nb = String((b && b.name) || "");
+        return na.localeCompare(nb);
+      });
+
+      const show = feedsOnlyProblems
+        ? list.filter(c => {
+            const st = feedState(c);
+            return st.kind === "down" || st.kind === "warn";
+          })
+        : list;
+
+      if (!show.length) {
+        container.innerHTML = `<div class="empty">No problem feeds right now.</div>`;
+        return;
+      }
+
+      container.innerHTML = show.map(c => {
+        const st = feedState(c);
+        const name = escapeHtml(c && c.name ? c.name : "Unnamed");
+        const url = c && c.url ? String(c.url) : "";
+        const err = c && c.last_error ? String(c.last_error) : "";
+        const loc = c && c.location ? String(c.location) : "";
+
+        const age = (c && c.audio_age_s !== null && c.audio_age_s !== undefined) ? Number(c.audio_age_s) : NaN;
+        const ageText = Number.isFinite(age) ? ("audio " + formatAge(age)) : "audio --";
+        const restarts = Number((c && c.restart_count) || 0);
+
+        const pills = [];
+        pills.push(`<span class="pill ${st.pillClass}">${escapeHtml(st.label)}</span>`);
+        if (c && c.enabled) pills.push(`<span class="pill">${escapeHtml(ageText)}</span>`);
+        if (restarts > 0) pills.push(`<span class="pill prio-med">restarts ${escapeHtml(String(restarts))}</span>`);
+
+        const dotCls = st.dotClass ? `dot ${st.dotClass}` : "dot";
+
+        return `
+          <div class="feed">
+            <div class="feed-top">
+              <div class="feed-main">
+                <span class="${dotCls}"></span>
+                <div style="min-width:0;">
+                  <div class="feed-name">${name}</div>
+                  ${loc ? `<div class="feed-loc">${escapeHtml(loc)}</div>` : ``}
+                </div>
+              </div>
+              <div class="feed-meta">${pills.join("")}</div>
+            </div>
+            ${url ? `<div class="feed-url">${escapeHtml(url)}</div>` : ``}
+            ${err ? `<div class="feed-error">${escapeHtml(err)}</div>` : ``}
+          </div>
+        `;
+      }).join("");
     }
 
 
@@ -1646,6 +1816,14 @@ DASHBOARD_TEMPLATE = """
     initMapOnce();
     fetchCoverage();
     setInterval(fetchCoverage, 30000);
+    const feedsBtn = document.getElementById("feeds-toggle");
+    if (feedsBtn) {
+      feedsBtn.addEventListener("click", () => {
+        feedsOnlyProblems = !feedsOnlyProblems;
+        feedsBtn.textContent = feedsOnlyProblems ? "Show all" : "Only problems";
+        renderFeeds(lastFeeds);
+      });
+    }
 
 
     // Initial load + auto-refresh

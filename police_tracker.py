@@ -471,6 +471,9 @@ class ChannelMonitor:
         self.last_error: Optional[str] = None
         self.last_audio_time: Optional[float] = None
         self.last_event_time: Optional[float] = None
+        self.restart_count: int = 0
+        self.last_restart_time: Optional[float] = None
+        self.last_exit_code: Optional[int] = None
         self.last_keyword_event_times: Dict[str, float] = {}
         self.process: Optional[subprocess.Popen] = None
         self.thread: Optional[threading.Thread] = None
@@ -547,10 +550,18 @@ class ChannelMonitor:
 
         while not self._stop_event.is_set():
             try:
+                # ffmpeg options:
+                # -reconnect*: keep streamed HTTP audio resilient
+                # -rw_timeout: fail fast if the socket stalls
                 command = [
                     "ffmpeg",
-                    "-loglevel", "quiet",
+                    "-hide_banner",
+                    "-loglevel", "error",
                     "-nostdin",
+                    "-reconnect", "1",
+                    "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "2",
+                    "-rw_timeout", "15000000",
                     "-i", self.url,
                     "-f", "s16le",
                     "-ac", str(channels),
@@ -561,10 +572,11 @@ class ChannelMonitor:
                 self.process = subprocess.Popen(
                     command,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.PIPE,
                 )
                 active_streams[self.name] = self.process
                 self.last_error = None
+                self.last_exit_code = None
 
                 while not self._stop_event.is_set():
                     if not self.process or not self.process.stdout:
@@ -612,13 +624,43 @@ class ChannelMonitor:
                     except Exception:
                         pass
 
-                if self.process:
-                    self.process.terminate()
-                    self.process.wait(timeout=5)
+                # If we ended unexpectedly, capture a small error summary from stderr (if any).
+                if self.process and not self._stop_event.is_set():
+                    try:
+                        if self.process.poll() is None:
+                            self.process.terminate()
+                            self.process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            self.process.kill()
+                            self.process.wait(timeout=5)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                    try:
+                        self.last_exit_code = self.process.poll()
+                    except Exception:
+                        self.last_exit_code = None
+
+                    try:
+                        if self.process.stderr:
+                            err = self.process.stderr.read() or b""
+                            tail = err[-2000:].decode("utf-8", errors="replace").strip()
+                            if tail:
+                                last_line = tail.splitlines()[-1].strip()
+                                if self.last_exit_code is not None and self.last_exit_code != 0:
+                                    self.last_error = f"ffmpeg exit {self.last_exit_code}: {last_line}"[:300]
+                                else:
+                                    self.last_error = last_line[:300]
+                    except Exception:
+                        pass
             except Exception as e:
                 self.last_error = str(e)
                 logger.error(f"Error in channel {self.name}: {e}")
             finally:
+                active_streams.pop(self.name, None)
                 if self.process:
                     try:
                         self.process.kill()
@@ -627,7 +669,10 @@ class ChannelMonitor:
                     self.process = None
 
             if not self._stop_event.is_set():
-                logger.warning(f"Restarting channel {self.name} in {backoff_seconds}s")
+                self.restart_count += 1
+                self.last_restart_time = time.time()
+                reason = f" (last_error={self.last_error})" if self.last_error else ""
+                logger.warning(f"Restarting channel {self.name} in {backoff_seconds}s{reason}")
                 time.sleep(backoff_seconds)
                 backoff_seconds = min(backoff_seconds * 2, 30)
     
@@ -649,6 +694,13 @@ class ChannelMonitor:
     
     def get_status(self) -> Dict:
         """Get current status of this channel"""
+        now = time.time()
+        audio_age_s = None
+        if self.last_audio_time is not None:
+            try:
+                audio_age_s = now - float(self.last_audio_time)
+            except Exception:
+                audio_age_s = None
         return {
             "name": self.name,
             "enabled": self.enabled,
@@ -658,8 +710,12 @@ class ChannelMonitor:
             "location": self.location,
             "priority": self.priority,
             "last_audio_time": self.last_audio_time,
+            "audio_age_s": audio_age_s,
             "last_event_time": self.last_event_time,
-            "last_error": self.last_error
+            "last_error": self.last_error,
+            "restart_count": self.restart_count,
+            "last_restart_time": self.last_restart_time,
+            "last_exit_code": self.last_exit_code,
         }
 
 
