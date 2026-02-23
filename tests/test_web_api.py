@@ -67,6 +67,26 @@ class TestWebAPI(unittest.TestCase):
         self.assertGreaterEqual(data.get("count", 0), 1)
         self.assertIn("stats", data)
 
+    def test_event_feedback_endpoint(self):
+        payload = {"channel": "Chan", "timestamp": time.time(), "keywords": ["accident"], "transcript": "Test transcript"}
+        resp = self.client.post("/api/events", json=payload, headers={"Authorization": "Bearer testtoken"})
+        self.assertEqual(resp.status_code, 201)
+        event_id = resp.get_json().get("event_id")
+        self.assertTrue(event_id)
+
+        resp = self.client.post(f"/api/events/{event_id}/feedback", json={"label": "up"})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("event_id"), event_id)
+        self.assertEqual(data.get("up"), 1)
+        self.assertEqual(data.get("down"), 0)
+
+        resp = self.client.post(f"/api/events/{event_id}/feedback", json={"label": "down"})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("up"), 1)
+        self.assertEqual(data.get("down"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

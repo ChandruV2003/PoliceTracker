@@ -217,6 +217,18 @@ def init_db():
             )
         """)
 
+        db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS event_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+            )
+        """)
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_event_feedback_event_id ON event_feedback(event_id)")
+        db_conn.execute("CREATE INDEX IF NOT EXISTS idx_event_feedback_label ON event_feedback(label)")
+
         db_conn.commit()
 
 
@@ -321,7 +333,34 @@ def persist_event(event: Dict) -> int:
 
 def query_events(limit: int, channel: Optional[str] = None, keyword: Optional[str] = None, since: Optional[float] = None) -> List[Dict]:
     """Query events from SQLite with optional filters."""
-    sql = "SELECT id, timestamp, channel, keywords, transcript, priority, location, units, lat, lon, geo_source, geo_confidence, geo_query FROM events e WHERE 1=1"
+    sql = """
+        SELECT
+            e.id,
+            e.timestamp,
+            e.channel,
+            e.keywords,
+            e.transcript,
+            e.priority,
+            e.location,
+            e.units,
+            e.lat,
+            e.lon,
+            e.geo_source,
+            e.geo_confidence,
+            e.geo_query,
+            COALESCE(fb.up, 0) AS feedback_up,
+            COALESCE(fb.down, 0) AS feedback_down
+        FROM events e
+        LEFT JOIN (
+            SELECT
+                event_id,
+                SUM(CASE WHEN label = 'up' THEN 1 ELSE 0 END) AS up,
+                SUM(CASE WHEN label = 'down' THEN 1 ELSE 0 END) AS down
+            FROM event_feedback
+            GROUP BY event_id
+        ) fb ON fb.event_id = e.id
+        WHERE 1=1
+    """
     params: List[object] = []
 
     if channel:
@@ -372,6 +411,8 @@ def query_events(limit: int, channel: Optional[str] = None, keyword: Optional[st
             "geo_source": row["geo_source"],
             "geo_confidence": row["geo_confidence"],
             "geo_query": row["geo_query"],
+            "feedback_up": int(row["feedback_up"] or 0),
+            "feedback_down": int(row["feedback_down"] or 0),
         })
     return results
 
@@ -870,6 +911,8 @@ DASHBOARD_TEMPLATE = """
 	  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 	  <title>PoliceTracker Dashboard</title>
 	  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+	  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+	  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 	  <style>
 	    :root {
 	      --bg: #f5f7fb;
@@ -1011,7 +1054,7 @@ DASHBOARD_TEMPLATE = """
     .controls {
       padding: 12px;
       display: grid;
-      grid-template-columns: 1fr 220px 160px 160px auto;
+      grid-template-columns: 1fr 220px 160px 160px 160px auto;
       gap: 10px;
       position: sticky;
       top: 0;
@@ -1201,6 +1244,17 @@ DASHBOARD_TEMPLATE = """
 	      align-items: center;
 	    }
 
+	    .linkbtn.active {
+	      border-color: rgba(37, 99, 235, .45);
+	      color: var(--accent);
+	      background: rgba(37, 99, 235, .08);
+	    }
+
+	    .linkbtn:disabled {
+	      opacity: .55;
+	      cursor: not-allowed;
+	    }
+
 	    .map-panel { overflow: hidden; }
 	    .map-header {
 	      padding: 10px 12px;
@@ -1216,6 +1270,14 @@ DASHBOARD_TEMPLATE = """
 		    .map-title { font-family: var(--mono); color: var(--text); font-weight: 800; }
 		    #map { height: 360px; width: 100%; }
 		    @media (max-width: 640px) { #map { height: 280px; } }
+
+		    /* Match markercluster styling to the utilitarian theme */
+		    .marker-cluster-small { background-color: rgba(37, 99, 235, .18); }
+		    .marker-cluster-small div { background-color: rgba(37, 99, 235, .35); color: #fff; font-family: var(--mono); }
+		    .marker-cluster-medium { background-color: rgba(217, 119, 6, .18); }
+		    .marker-cluster-medium div { background-color: rgba(217, 119, 6, .35); color: #fff; font-family: var(--mono); }
+		    .marker-cluster-large { background-color: rgba(220, 38, 38, .18); }
+		    .marker-cluster-large div { background-color: rgba(220, 38, 38, .35); color: #fff; font-family: var(--mono); }
 
 		    .feeds-panel { overflow: hidden; }
 		    #feeds-list { padding: 10px 12px; display: grid; gap: 8px; }
@@ -1300,6 +1362,11 @@ DASHBOARD_TEMPLATE = """
         <option value="1h">Last hour</option>
         <option value="24h">Last 24 hours</option>
 	      </select>
+      <select id="group">
+        <option value="off">No grouping</option>
+        <option value="120">Group 2m</option>
+        <option value="300">Group 5m</option>
+      </select>
 	      <button id="refresh" type="button">Refresh</button>
 	    </section>
 
@@ -1308,6 +1375,11 @@ DASHBOARD_TEMPLATE = """
 		        <div class="map-title">Map</div>
 		        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
 		          <span><span id="map-count">0</span> plotted</span>
+		          <div style="display:flex; gap:6px; align-items:center;">
+		            <button id="map-mode-markers" class="linkbtn" type="button">Markers</button>
+		            <button id="map-mode-cluster" class="linkbtn" type="button">Cluster</button>
+		            <button id="map-mode-heat" class="linkbtn" type="button">Heat</button>
+		          </div>
 		          <button id="fit-map" class="linkbtn" type="button">Fit</button>
 		        </div>
 		      </div>
@@ -1329,7 +1401,7 @@ DASHBOARD_TEMPLATE = """
 
 		    <section class="panel events">
 		      <div class="events-header">
-		        <div><span id="result-count">0</span> events loaded</div>
+		        <div><span id="result-count">0</span> shown <span id="raw-count"></span></div>
 		        <div style="font-family: var(--mono);">GET /api/events</div>
 		      </div>
       <div id="events-list">
@@ -1339,12 +1411,15 @@ DASHBOARD_TEMPLATE = """
 	  </div>
 
 	  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+	  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+	  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 	  <script>
 	    const state = {
 	      search: "",
 	      channel: "all",
       priority: "all",
-      range: "all"
+      range: "all",
+      group: "off"
     };
 
 	    let allEvents = [];
@@ -1355,10 +1430,14 @@ DASHBOARD_TEMPLATE = """
 
     // Theme + map state
     const THEME_KEY = "pt_theme";
+    const MAP_MODE_KEY = "pt_map_mode";
     let map = null;
     let markerLayer = null;
+    let clusterLayer = null;
+    let heatLayer = null;
     let tileLayers = null;
     let didAutoFit = false;
+    let mapMode = "cluster";
 
     function currentTheme() {
       const saved = localStorage.getItem(THEME_KEY);
@@ -1392,6 +1471,56 @@ DASHBOARD_TEMPLATE = """
       applyTheme(mode === "dark" ? "light" : "dark");
     }
 
+    function currentMapMode() {
+      const saved = localStorage.getItem(MAP_MODE_KEY);
+      if (saved === "markers") return "markers";
+      if (saved === "cluster") return (window.L && L.markerClusterGroup) ? "cluster" : "markers";
+      if (saved === "heat") return (window.L && L.heatLayer) ? "heat" : "markers";
+      return (window.L && L.markerClusterGroup) ? "cluster" : "markers";
+    }
+
+    function updateMapModeButtons() {
+      const btnMarkers = document.getElementById("map-mode-markers");
+      const btnCluster = document.getElementById("map-mode-cluster");
+      const btnHeat = document.getElementById("map-mode-heat");
+      if (btnMarkers) btnMarkers.classList.toggle("active", mapMode === "markers");
+      if (btnCluster) {
+        btnCluster.disabled = !(window.L && L.markerClusterGroup);
+        btnCluster.classList.toggle("active", mapMode === "cluster");
+      }
+      if (btnHeat) {
+        btnHeat.disabled = !(window.L && L.heatLayer);
+        btnHeat.classList.toggle("active", mapMode === "heat");
+      }
+    }
+
+    function setMapMode(mode) {
+      const m = (mode === "markers" || mode === "cluster" || mode === "heat") ? mode : "markers";
+      mapMode = m;
+      localStorage.setItem(MAP_MODE_KEY, m);
+      updateMapModeButtons();
+      didAutoFit = false;
+      updateMap(getDisplayEvents(), true);
+    }
+
+    function attachActiveMapLayer() {
+      if (!map) return;
+      const want = (mapMode === "heat" && heatLayer) ? heatLayer : (mapMode === "cluster" && clusterLayer) ? clusterLayer : markerLayer;
+      for (const layer of [markerLayer, clusterLayer, heatLayer]) {
+        if (!layer) continue;
+        if (layer !== want && map.hasLayer(layer)) {
+          try {
+            map.removeLayer(layer);
+          } catch (e) {}
+        }
+      }
+      if (want && !map.hasLayer(want)) {
+        try {
+          want.addTo(map);
+        } catch (e) {}
+      }
+    }
+
     function initMapOnce() {
       if (map || !window.L) return;
       map = L.map("map", { zoomControl: true });
@@ -1402,14 +1531,27 @@ DASHBOARD_TEMPLATE = """
         dark: L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap contributors &copy; CARTO" })
       };
 
-      markerLayer = L.layerGroup().addTo(map);
+      mapMode = currentMapMode();
+
+      markerLayer = L.layerGroup();
+      clusterLayer = (L.markerClusterGroup ? L.markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 55 }) : null);
+      heatLayer = (L.heatLayer ? L.heatLayer([], { radius: 20, blur: 16, maxZoom: 12 }) : null);
+      attachActiveMapLayer();
       applyTheme(currentTheme());
+      updateMapModeButtons();
+
+      const btnMarkers = document.getElementById("map-mode-markers");
+      if (btnMarkers) btnMarkers.addEventListener("click", () => setMapMode("markers"));
+      const btnCluster = document.getElementById("map-mode-cluster");
+      if (btnCluster) btnCluster.addEventListener("click", () => setMapMode("cluster"));
+      const btnHeat = document.getElementById("map-mode-heat");
+      if (btnHeat) btnHeat.addEventListener("click", () => setMapMode("heat"));
 
       const fitBtn = document.getElementById("fit-map");
       if (fitBtn) {
         fitBtn.addEventListener("click", () => {
           didAutoFit = false;
-          updateMap(applyPriorityFilter(allEvents), true);
+          updateMap(getDisplayEvents(), true);
         });
       }
     }
@@ -1421,12 +1563,25 @@ DASHBOARD_TEMPLATE = """
       return "#475569";
     }
 
+    function dotIcon(color) {
+      return L.divIcon({
+        className: "",
+        html: `<div style="width:10px;height:10px;border-radius:999px;background:${color};border:2px solid rgba(255,255,255,.9);"></div>`,
+        iconSize: [10, 10],
+        iconAnchor: [5, 5],
+      });
+    }
+
     function updateMap(events, forceFit = false) {
       initMapOnce();
       if (!map || !markerLayer) return;
-      markerLayer.clearLayers();
+      try { markerLayer.clearLayers(); } catch (e) {}
+      try { if (clusterLayer) clusterLayer.clearLayers(); } catch (e) {}
+      try { if (heatLayer) heatLayer.setLatLngs([]); } catch (e) {}
+      attachActiveMapLayer();
 
       const points = [];
+      const heatPoints = [];
       let plotted = 0;
 
       for (const e of (events || [])) {
@@ -1443,14 +1598,6 @@ DASHBOARD_TEMPLATE = """
         const src = e.geo_source ? String(e.geo_source) : "unknown";
         const conf = (e.geo_confidence !== null && e.geo_confidence !== undefined) ? Number(e.geo_confidence) : null;
 
-        const marker = L.circleMarker([lat, lon], {
-          radius: pr >= 8 ? 7 : (pr >= 5 ? 6 : 5),
-          color: color,
-          fillColor: color,
-          fillOpacity: 0.65,
-          weight: 2,
-        });
-
         let popup = "<div style='font-family: var(--mono); font-size: 12px; line-height: 1.35;'>";
         popup += "<div><b>" + escapeHtml(e.channel || "Unknown") + "</b></div>";
         if (when) popup += "<div>" + escapeHtml(when) + "</div>";
@@ -1459,8 +1606,34 @@ DASHBOARD_TEMPLATE = """
         if (kw.length) popup += "<div style='margin-top:4px;'>" + kw.map(k => "<span style='display:inline-block; margin:2px 4px 0 0; padding:2px 6px; border:1px solid rgba(148,163,184,.25); border-radius:999px;'>" + escapeHtml(k) + "</span>").join("") + "</div>";
         popup += "</div>";
 
+        if (mapMode === "heat" && heatLayer) {
+          const intensity = pr >= 8 ? 1.0 : (pr >= 5 ? 0.7 : 0.45);
+          heatPoints.push([lat, lon, intensity]);
+          continue;
+        }
+
+        if (mapMode === "cluster" && clusterLayer) {
+          const marker = L.marker([lat, lon], { icon: dotIcon(color), keyboard: false });
+          marker.bindPopup(popup);
+          clusterLayer.addLayer(marker);
+          continue;
+        }
+
+        const marker = L.circleMarker([lat, lon], {
+          radius: pr >= 8 ? 7 : (pr >= 5 ? 6 : 5),
+          color: color,
+          fillColor: color,
+          fillOpacity: 0.65,
+          weight: 2,
+        });
         marker.bindPopup(popup);
         marker.addTo(markerLayer);
+      }
+
+      if (mapMode === "heat" && heatLayer) {
+        try {
+          heatLayer.setLatLngs(heatPoints);
+        } catch (e) {}
       }
 
       const countEl = document.getElementById("map-count");
@@ -1651,6 +1824,58 @@ DASHBOARD_TEMPLATE = """
       return events;
     }
 
+    function groupKey(e) {
+      const ch = String((e && e.channel) || "");
+      const kws = Array.isArray(e && e.keywords) ? e.keywords.slice().map(x => String(x)).sort().join(",") : "";
+      const hint = String((e && e.geo_query) || "").toLowerCase().trim();
+      return ch + "|" + kws + "|" + hint;
+    }
+
+    function groupEvents(events, windowSeconds) {
+      const w = Number(windowSeconds);
+      if (!Number.isFinite(w) || w <= 0) return events || [];
+      const list = Array.isArray(events) ? events : [];
+      const out = [];
+      const lastByKey = new Map();
+
+      for (const e of list) {
+        const ts = Number((e && e.timestamp) || 0);
+        const key = groupKey(e);
+        const g = lastByKey.get(key);
+        if (g && (Number(g.group_last_ts || 0) - ts) <= w) {
+          g.group_count = Number(g.group_count || 1) + 1;
+          g.group_first_ts = Math.min(Number(g.group_first_ts || ts), ts);
+          g.group_ids.push(e.id);
+          g.feedback_up = Number(g.feedback_up || 0) + Number(e.feedback_up || 0);
+          g.feedback_down = Number(g.feedback_down || 0) + Number(e.feedback_down || 0);
+          g.priority = Math.max(Number(g.priority ?? 0), Number(e.priority ?? 0));
+          if (e && e.transcript && g.group_samples && g.group_samples.length < 3) {
+            g.group_samples.push(String(e.transcript));
+          }
+          continue;
+        }
+
+        const base = Object.assign({}, e);
+        base.group_count = 1;
+        base.group_first_ts = ts;
+        base.group_last_ts = ts;
+        base.group_ids = [e.id];
+        base.group_samples = (e && e.transcript) ? [String(e.transcript)] : [];
+        base.feedback_up = Number(e.feedback_up || 0);
+        base.feedback_down = Number(e.feedback_down || 0);
+        lastByKey.set(key, base);
+        out.push(base);
+      }
+
+      return out;
+    }
+
+    function getDisplayEvents() {
+      const raw = applyPriorityFilter(allEvents);
+      if (!state.group || state.group === "off") return raw;
+      return groupEvents(raw, Number(state.group));
+    }
+
     function rangeSince() {
       const now = Date.now() / 1000;
       if (state.range === "1h") return now - 3600;
@@ -1686,9 +1911,15 @@ DASHBOARD_TEMPLATE = """
 
     function render() {
       const container = document.getElementById("events-list");
-      let eventsToShow = applyPriorityFilter(allEvents);
+      const raw = applyPriorityFilter(allEvents);
+      let eventsToShow = raw;
+      if (state.group && state.group !== "off") {
+        eventsToShow = groupEvents(raw, Number(state.group));
+      }
 
       document.getElementById("result-count").textContent = String(eventsToShow.length);
+      const rawCountEl = document.getElementById("raw-count");
+      if (rawCountEl) rawCountEl.textContent = (state.group && state.group !== "off") ? `/ ${raw.length} raw` : "";
 
       updateMap(eventsToShow);
 
@@ -1704,6 +1935,27 @@ DASHBOARD_TEMPLATE = """
         const keywords = Array.isArray(e.keywords) ? e.keywords : [];
         const loc = e.location ? String(e.location) : "";
         const transcript = e.transcript ? String(e.transcript) : "";
+        const units = Array.isArray(e.units) ? e.units : [];
+        const geoQuery = e.geo_query ? String(e.geo_query) : "";
+        const geoSrc = e.geo_source ? String(e.geo_source) : "";
+        const geoConf = (e.geo_confidence !== null && e.geo_confidence !== undefined) ? Number(e.geo_confidence) : null;
+        const lat = (e.lat !== null && e.lat !== undefined) ? Number(e.lat) : null;
+        const lon = (e.lon !== null && e.lon !== undefined) ? Number(e.lon) : null;
+
+        const groupCount = Number(e.group_count || 1);
+        const groupFirst = Number(e.group_first_ts || ts);
+        const groupLast = Number(e.group_last_ts || ts);
+        const groupIds = Array.isArray(e.group_ids) ? e.group_ids : [];
+        const groupSamples = Array.isArray(e.group_samples) ? e.group_samples : [];
+
+        const fbUp = Number(e.feedback_up || 0);
+        const fbDown = Number(e.feedback_down || 0);
+
+        const idStr = String(e.id || "");
+        const voted = idStr ? localStorage.getItem("pt_vote_" + idStr) : null;
+        const voteDisabled = Boolean(voted);
+        const upActive = voted === "up";
+        const downActive = voted === "down";
 
         return `
           <div class="event" data-id="${escapeHtml(e.id || "")}">
@@ -1712,6 +1964,7 @@ DASHBOARD_TEMPLATE = """
               <div class="meta">
                 <span class="pill ${priorityClass(pr)}">P${escapeHtml(pr)}</span>
                 <span class="pill">#${escapeHtml(e.id || "-")}</span>
+                ${groupCount > 1 ? `<span class="pill">x${escapeHtml(String(groupCount))}</span>` : ``}
               </div>
             </div>
             <div>
@@ -1725,8 +1978,19 @@ DASHBOARD_TEMPLATE = """
                   ${keywords.map(k => `<span class="badge">${escapeHtml(k)}</span>`).join("")}
                 </div>
               ` : ``}
+              <div class="details">
+                ${groupCount > 1 ? `<div>group: x${escapeHtml(String(groupCount))} over ${escapeHtml(String(Math.max(0, Math.round(groupLast - groupFirst))))}s (${escapeHtml(formatRel(groupFirst))} → ${escapeHtml(formatRel(groupLast))})</div>` : ``}
+                ${groupSamples.length > 1 ? `<div>samples: ${groupSamples.slice(0, 3).map(s => escapeHtml(String(s))).join(" | ")}</div>` : ``}
+                ${units.length ? `<div>units: ${escapeHtml(units.join(", "))}</div>` : ``}
+                ${geoQuery ? `<div>hint: ${escapeHtml(geoQuery)}</div>` : ``}
+                <div>geo: ${escapeHtml(geoSrc || "--")}${geoConf !== null ? ` (${escapeHtml(geoConf.toFixed(2))})` : ``}${(lat !== null && lon !== null && Number.isFinite(lat) && Number.isFinite(lon)) ? ` @ ${escapeHtml(lat.toFixed(5))}, ${escapeHtml(lon.toFixed(5))}` : ``}</div>
+                <div>feedback: good ${escapeHtml(String(fbUp))} • bad ${escapeHtml(String(fbDown))}</div>
+                ${groupIds.length > 1 ? `<div>ids: ${escapeHtml(groupIds.slice(0, 8).join(", "))}${groupIds.length > 8 ? "…" : ""}</div>` : ``}
+              </div>
               <div class="actions">
                 <button class="linkbtn" type="button" data-action="toggle">Details</button>
+                <button class="linkbtn ${upActive ? "active" : ""}" type="button" data-action="fb-up" ${voteDisabled ? "disabled" : ""} title="Mark as accurate">${escapeHtml(`Good (${fbUp})`)}</button>
+                <button class="linkbtn ${downActive ? "active" : ""}" type="button" data-action="fb-down" ${voteDisabled ? "disabled" : ""} title="Mark as noise/false positive">${escapeHtml(`Bad (${fbDown})`)}</button>
               </div>
             </div>
           </div>
@@ -1739,6 +2003,52 @@ DASHBOARD_TEMPLATE = """
           if (!card) return;
           card.classList.toggle("expanded");
           btn.textContent = card.classList.contains("expanded") ? "Collapse" : "Details";
+        });
+      });
+
+      container.querySelectorAll("button[data-action='fb-up'], button[data-action='fb-down']").forEach(btn => {
+        btn.addEventListener("click", async (ev) => {
+          const b = ev.target;
+          const card = b.closest(".event");
+          if (!card) return;
+          const eventId = card.dataset.id;
+          if (!eventId) return;
+
+          const action = b.getAttribute("data-action");
+          const label = (action === "fb-up") ? "up" : "down";
+          const key = "pt_vote_" + String(eventId);
+          if (localStorage.getItem(key)) return;
+
+          // Optimistic disable while we POST.
+          card.querySelectorAll("button[data-action='fb-up'], button[data-action='fb-down']").forEach(x => x.disabled = true);
+
+          try {
+            const resp = await fetch(`/api/events/${encodeURIComponent(eventId)}/feedback`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ label })
+            });
+            if (!resp.ok) throw new Error("HTTP " + resp.status);
+            const data = await resp.json();
+
+            localStorage.setItem(key, label);
+
+            const up = Number(data.up || 0);
+            const down = Number(data.down || 0);
+            const btnUp = card.querySelector("button[data-action='fb-up']");
+            const btnDown = card.querySelector("button[data-action='fb-down']");
+            if (btnUp) {
+              btnUp.textContent = `Good (${up})`;
+              btnUp.classList.toggle("active", label === "up");
+            }
+            if (btnDown) {
+              btnDown.textContent = `Bad (${down})`;
+              btnDown.classList.toggle("active", label === "down");
+            }
+          } catch (e) {
+            // Re-enable to allow retry.
+            card.querySelectorAll("button[data-action='fb-up'], button[data-action='fb-down']").forEach(x => x.disabled = false);
+          }
         });
       });
     }
@@ -1807,6 +2117,11 @@ DASHBOARD_TEMPLATE = """
       fetchEvents();
     });
 
+    document.getElementById("group").addEventListener("change", (ev) => {
+      state.group = ev.target.value;
+      render();
+    });
+
     document.getElementById("refresh").addEventListener("click", () => fetchEvents());
 
     // Boot helpers
@@ -1869,6 +2184,43 @@ def get_events():
         "count": len(filtered_events),
         "stats": stats_snapshot
     })
+
+
+@app.route("/api/events/<int:event_id>/feedback", methods=["POST"])
+@require_dashboard_auth
+def create_feedback(event_id: int):
+    """Record simple dashboard feedback on an event (up/down)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        label = str(data.get("label") or "").strip().lower()
+        if label not in {"up", "down"}:
+            return jsonify({"error": "Invalid label; expected 'up' or 'down'"}), 400
+
+        now = time.time()
+        with db_lock:
+            db_conn.execute(
+                "INSERT INTO event_feedback (event_id, label, created_at) VALUES (?, ?, ?)",
+                (int(event_id), label, float(now)),
+            )
+            db_conn.commit()
+
+            row = db_conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN label = 'up' THEN 1 ELSE 0 END) AS up,
+                    SUM(CASE WHEN label = 'down' THEN 1 ELSE 0 END) AS down
+                FROM event_feedback
+                WHERE event_id = ?
+                """,
+                (int(event_id),),
+            ).fetchone()
+
+        up = int(row["up"] or 0) if row else 0
+        down = int(row["down"] or 0) if row else 0
+        return jsonify({"event_id": int(event_id), "up": up, "down": down, "label": label})
+    except Exception as e:
+        logger.error(f"Feedback error for event {event_id}: {e}")
+        return jsonify({"error": "feedback_failed"}), 500
 
 
 @app.route('/api/events', methods=['POST'])
@@ -1944,7 +2296,19 @@ def create_event():
         event["lon"] = lon_f
         event["geo_source"] = geo_source
         event["geo_confidence"] = geo_confidence_f
-        event["geo_query"] = data.get("geo_query") or event.get("location", "")
+        incoming_geo_query = data.get("geo_query")
+        event["geo_query"] = incoming_geo_query or event.get("location", "")
+        # Best-effort: store a per-event location hint even if we can't geocode it.
+        # This helps grouping/dedup and gives the UI a more informative context string.
+        try:
+            hint = extract_location_hint(
+                str(event.get("transcript") or ""),
+                context=str(event.get("location") or ""),
+            )
+            if hint and (not incoming_geo_query or incoming_geo_query == event.get("location", "")):
+                event["geo_query"] = hint
+        except Exception:
+            pass
         if lat_f is not None and lon_f is not None:
             event["geo_updated_at"] = float(data.get("geo_updated_at", time.time()))
 
